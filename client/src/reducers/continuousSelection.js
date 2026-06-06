@@ -4,7 +4,8 @@ const ContinuousSelection = (state = {}, action) => {
   switch (action.type) {
     case "reset subset":
     case "subset to selection":
-    case "set clip quantiles": {
+    case "set clip quantiles":
+    case "recluster: success": {
       return {};
     }
     case "continuous metadata histogram start":

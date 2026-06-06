@@ -81,7 +81,7 @@ the FE developer gets the current version of the backend with a single command
 and no knowledge of python necessary. It creates and activates a virtual
 environment and installs cellxgene from the current branch.
 
-**Requires** `Python3.10+`, `virtual-env`, `pip`
+**Requires** `Python3.12+`, `virtual-env`, `pip`
 
 **Usage:** from the `$PROJECT_ROOT` directory run `./scripts/backend_dev`
 

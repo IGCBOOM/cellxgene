@@ -1,2 +1,2 @@
-mlflow==2.16.0
-scanpy
+mlflow>=2.16.0
+scanpy[leiden]>=1.12,<1.13

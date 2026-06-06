@@ -1,8 +1,15 @@
+import os
+import tempfile
+import time
 import warnings
 import importlib.metadata
+from concurrent.futures import ThreadPoolExecutor
+from threading import RLock
+from uuid import uuid4
 
 import anndata
 import numpy as np
+import pandas as pd
 from packaging import version
 from pandas.core.dtypes.dtypes import CategoricalDtype
 from scipy import sparse
@@ -16,6 +23,14 @@ from server.common.errors import PrepareError, DatasetAccessError
 from server.common.utils.type_conversion_utils import get_schema_type_hint_of_array
 from server.data_common.data_adaptor import DataAdaptor
 from server.common.fbs.matrix import encode_matrix_fbs
+from server.common.compute.recluster import (
+    OUTSIDE_RECLUSTER_CATEGORY,
+    ReclusterJob,
+    public_gene_filter_summary,
+    recluster_from_expression_genes,
+    recluster_from_obsm,
+    resolve_gene_filter,
+)
 
 anndata_version = version.parse(str(importlib.metadata.version('anndata'))).release
 
@@ -31,11 +46,15 @@ class AnndataAdaptor(DataAdaptor):
         super().__init__(data_locator, app_config, dataset_config)
         self.data = None
         self.X_approximate_distribution = None
+        self._recluster_jobs = {}
+        self._recluster_results = {}
+        self._recluster_lock = RLock()
+        self._recluster_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cxg-recluster")
         self._load_data(data_locator)
         self._validate_and_initialize()
 
     def cleanup(self):
-        pass
+        self._recluster_executor.shutdown(wait=False, cancel_futures=True)
 
     @staticmethod
     def pre_load_validation(data_locator):
@@ -64,7 +83,13 @@ class AnndataAdaptor(DataAdaptor):
         return "cellxgene anndata adaptor version"
 
     def get_library_versions(self):
-        return dict(anndata=str(importlib.metadata.version('anndata')))
+        versions = dict(anndata=str(importlib.metadata.version("anndata")))
+        for package_name in ("scanpy", "igraph", "leidenalg", "umap-learn"):
+            try:
+                versions[package_name] = str(importlib.metadata.version(package_name))
+            except importlib.metadata.PackageNotFoundError:
+                pass
+        return versions
 
     @staticmethod
     def _create_unique_column_name(df, col_name_prefix):
@@ -212,6 +237,10 @@ class AnndataAdaptor(DataAdaptor):
         self.cell_count = self.data.shape[0]
         self.gene_count = self.data.shape[1]
         self._create_schema()
+        self.parameters.update({
+            "recluster-enabled": True,
+            "recluster-representations": self.get_recluster_representations(),
+        })
 
         if self.dataset_config.X_approximate_distribution == "auto":
             """Lazy evaluate the heuristic if we are backed."""
@@ -224,6 +253,273 @@ class AnndataAdaptor(DataAdaptor):
         n_values = self.data.shape[0] * self.data.shape[1]
         if (n_values > 1e8 and self.server_config.adaptor__anndata_adaptor__backed is True) or (n_values > 5e8):
             self.parameters.update({"diffexp-may-be-slow": True})
+
+
+    def get_recluster_representations(self):
+        """Return .obsm keys suitable for memory-conscious reclustering."""
+        reps = []
+        for key, value in self.data.obsm.items():
+            if not isinstance(key, str):
+                continue
+            try:
+                if len(value.shape) == 2 and value.shape[0] == self.data.n_obs and value.shape[1] >= 2:
+                    reps.append(key)
+            except Exception:
+                continue
+        if "X_pca" in reps:
+            reps.remove("X_pca")
+            reps.insert(0, "X_pca")
+        return reps
+
+    def get_recluster_gene_names(self):
+        """Return frontend-visible gene names used by the gene-list UI.
+
+        CELLxGENE may alias var.index into a unique annotation column during
+        load. Use that configured display/index column so pasted gene symbols
+        match what users see in the interface.
+        """
+        var_name_col = self.parameters.get("var_names")
+        if var_name_col is not None and var_name_col in self.data.var:
+            return self.data.var[var_name_col].astype(str).to_numpy()
+        return np.asarray([str(x) for x in self.data.var_names], dtype=object)
+
+    def _resolve_recluster_gene_filter(self, params):
+        return resolve_gene_filter(self.get_recluster_gene_names(), params)
+
+    def _validate_recluster_gene_filter_limits(self, n_obs, gene_filter):
+        if gene_filter is None:
+            return
+
+        n_vars = int(gene_filter["included_gene_count"])
+        if self.server_config.exceeds_limit("recluster_gene_count_max", n_vars):
+            raise ValueError(
+                f"Expression-gene reclustering would use {n_vars} genes, which exceeds "
+                f"the configured recluster_gene_count_max limit"
+            )
+
+        expression_values = int(n_obs) * n_vars
+        if self.server_config.exceeds_limit("recluster_expression_values_max", expression_values):
+            raise ValueError(
+                "Expression-gene reclustering would materialize too many expression values "
+                f"({expression_values}). Use a smaller cell selection, fewer genes, "
+                "or raise recluster_expression_values_max in the server config."
+            )
+
+    def _recluster_cleanup_locked(self):
+        """Evict old completed jobs/results to bound memory use."""
+        ttl = self.server_config.limits__recluster_result_ttl_seconds
+        now = time.time()
+        if ttl is not None:
+            stale_result_ids = [
+                result_id
+                for result_id, result in self._recluster_results.items()
+                if now - result.created_at > ttl
+            ]
+            for result_id in stale_result_ids:
+                self._recluster_results.pop(result_id, None)
+
+            stale_job_ids = [
+                job_id
+                for job_id, job in self._recluster_jobs.items()
+                if job.status in ("complete", "error") and now - job.updated_at > ttl
+            ]
+            for job_id in stale_job_ids:
+                self._recluster_jobs.pop(job_id, None)
+
+        max_results = self.server_config.limits__recluster_results_per_session
+        if max_results is not None and max_results >= 0:
+            results_by_user = {}
+            for result in self._recluster_results.values():
+                results_by_user.setdefault(result.user_id, []).append(result)
+            for user_id, results in results_by_user.items():
+                results.sort(key=lambda r: r.created_at, reverse=True)
+                for old in results[max_results:]:
+                    self._recluster_results.pop(old.result_id, None)
+
+    def _get_recluster_result(self, user_id, result_id):
+        with self._recluster_lock:
+            result = self._recluster_results.get(result_id)
+            if result is None or result.user_id != user_id:
+                raise KeyError(f"Unknown recluster result: {result_id}")
+            return result
+
+    def _update_recluster_job(self, job_id, *, status=None, stage=None, progress=None, result=None, error=None):
+        with self._recluster_lock:
+            job = self._recluster_jobs[job_id]
+            job.update(status=status, stage=stage, progress=progress)
+            if result is not None:
+                job.result = result
+            if error is not None:
+                job.error = error
+
+    def _run_recluster_job(self, job_id, user_id, obs_indices, params, result_id, gene_filter=None):
+        def progress(stage, value):
+            self._update_recluster_job(job_id, status="running", stage=stage, progress=value)
+
+        try:
+            progress("Preparing selected cells", 0.05)
+            if gene_filter is None:
+                result = recluster_from_obsm(
+                    self.data,
+                    obs_indices,
+                    result_id=result_id,
+                    user_id=user_id,
+                    params=params,
+                    progress=progress,
+                )
+            else:
+                var_indices = gene_filter["var_indices"]
+                gene_names = self.get_recluster_gene_names()[var_indices]
+                result = recluster_from_expression_genes(
+                    self.data,
+                    obs_indices,
+                    var_indices=var_indices,
+                    var_names=gene_names,
+                    gene_filter=gene_filter,
+                    result_id=result_id,
+                    user_id=user_id,
+                    params=params,
+                    progress=progress,
+                )
+            with self._recluster_lock:
+                self._recluster_results[result.result_id] = result
+                self._recluster_cleanup_locked()
+            self._update_recluster_job(
+                job_id,
+                status="complete",
+                stage="Complete",
+                progress=1.0,
+                result=result.schema_payload(),
+            )
+        except Exception as e:  # noqa: B902 - preserve the message for the polling UI
+            self._update_recluster_job(
+                job_id,
+                status="error",
+                stage="Error",
+                progress=1.0,
+                error=str(e),
+            )
+
+    def recluster_obs_start(self, user_id, args):
+        args = args or {}
+        try:
+            obs_filter = args.get("filter", {}).get("obs", None)
+            if obs_filter is None:
+                raise ValueError("missing filter.obs")
+            obs_mask = self._axis_filter_to_mask(Axis.OBS, obs_filter, self.data.n_obs)
+        except (KeyError, IndexError, TypeError) as e:
+            raise ValueError(f"Error parsing obs filter: {e}")
+
+        obs_indices = np.flatnonzero(obs_mask).astype(np.int64)
+        n_obs = int(obs_indices.size)
+        if n_obs < self.server_config.limits__recluster_cellcount_min:
+            raise ValueError(
+                f"Select at least {self.server_config.limits__recluster_cellcount_min} cells to recluster"
+            )
+        if self.server_config.exceeds_limit("recluster_cellcount_max", n_obs):
+            raise ValueError("Recluster request exceeds max cell count limit")
+
+        params = dict(args.get("params", {}) or {})
+        gene_filter = self._resolve_recluster_gene_filter(params)
+        self._validate_recluster_gene_filter_limits(n_obs, gene_filter)
+
+        if gene_filter is None:
+            use_rep = params.get("use_rep", "X_pca")
+            if use_rep not in self.data.obsm:
+                available = ", ".join(self.get_recluster_representations())
+                raise ValueError(f"Representation {use_rep!r} is not available for reclustering. Available: {available}")
+
+        gene_filter_summary = public_gene_filter_summary(gene_filter)
+        n_vars = None if gene_filter is None else int(gene_filter["included_gene_count"])
+
+        with self._recluster_lock:
+            self._recluster_cleanup_locked()
+            max_jobs = self.server_config.limits__recluster_concurrent_jobs
+            running_for_user = [
+                job
+                for job in self._recluster_jobs.values()
+                if job.user_id == user_id and job.status in ("queued", "running")
+            ]
+            if max_jobs is not None and len(running_for_user) >= max_jobs:
+                raise ValueError("A reclustering job is already running for this session")
+
+            job_id = f"job_{uuid4().hex[:12]}"
+            result_id = uuid4().hex[:12]
+            job = ReclusterJob(
+                job_id=job_id,
+                user_id=user_id,
+                n_obs=n_obs,
+                n_vars=n_vars,
+                gene_filter=gene_filter_summary,
+            )
+            self._recluster_jobs[job_id] = job
+
+        self._recluster_executor.submit(
+            self._run_recluster_job,
+            job_id,
+            user_id,
+            obs_indices,
+            params,
+            result_id,
+            gene_filter,
+        )
+        return job.to_dict()
+
+    def recluster_obs_job_get(self, user_id, job_id):
+        with self._recluster_lock:
+            job = self._recluster_jobs.get(job_id)
+            if job is None or job.user_id != user_id:
+                raise KeyError(f"Unknown recluster job: {job_id}")
+            return job.to_dict()
+
+    def recluster_layout_to_fbs_matrix(self, user_id, result_id, layout_name):
+        result = self._get_recluster_result(user_id, result_id)
+        if layout_name != result.layout_name:
+            raise KeyError(f"Unknown recluster layout: {layout_name}")
+
+        full_embedding = np.full((self.data.n_obs, 2), np.nan, dtype=np.float32)
+        full_embedding[result.obs_indices, :] = result.embedding[:, 0:2]
+        normalized_layout = DataAdaptor.normalize_embedding(full_embedding)
+        df = pd.DataFrame(normalized_layout, columns=[f"{layout_name}_0", f"{layout_name}_1"])
+        return encode_matrix_fbs(df, col_idx=df.columns, row_idx=None)
+
+    def recluster_annotation_to_fbs_matrix(self, user_id, result_id, annotation_name):
+        result = self._get_recluster_result(user_id, result_id)
+        if annotation_name != result.cluster_name:
+            raise KeyError(f"Unknown recluster annotation: {annotation_name}")
+
+        labels = np.full((self.data.n_obs,), OUTSIDE_RECLUSTER_CATEGORY, dtype=object)
+        labels[result.obs_indices] = result.leiden
+        categories = result.categories + [OUTSIDE_RECLUSTER_CATEGORY]
+        series = pd.Series(pd.Categorical(labels, categories=categories), name=annotation_name)
+        df = pd.DataFrame({annotation_name: series})
+        return encode_matrix_fbs(df, col_idx=df.columns, row_idx=None)
+
+    def recluster_export_h5ad(self, user_id, result_id):
+        result = self._get_recluster_result(user_id, result_id)
+        if self.data.isbacked:
+            subset = self.data[result.obs_indices, :].to_memory()
+        else:
+            subset = self.data[result.obs_indices, :].copy()
+
+        subset.obsm["X_cellxgene_recluster_umap"] = result.embedding
+        subset.obs["cellxgene_recluster_leiden"] = pd.Categorical(result.leiden, categories=result.categories)
+        subset.obs["cellxgene_original_obs_index"] = result.obs_indices
+        if result.var_indices is not None:
+            used_gene_mask = np.zeros((self.data.n_vars,), dtype=bool)
+            used_gene_mask[result.var_indices] = True
+            subset.var["cellxgene_recluster_gene_used"] = used_gene_mask
+        subset.uns["cellxgene_recluster"] = {
+            "result_id": result.result_id,
+            "params": result.params,
+            "n_obs": int(result.obs_indices.size),
+            "n_vars": None if result.var_indices is None else int(result.var_indices.size),
+        }
+
+        fd, path = tempfile.mkstemp(prefix=f"cellxgene_{result_id}_", suffix=".h5ad")
+        os.close(fd)
+        subset.write_h5ad(path)
+        return path, f"cellxgene_recluster_{result_id}.h5ad"
 
     def _is_valid_layout(self, arr):
         """return True if this layout data is a valid array for front-end presentation:

@@ -1,11 +1,12 @@
 import copy
 import logging
+import os
 import sys
 from http import HTTPStatus
 import zlib
 import json
 
-from flask import make_response, jsonify, current_app, abort
+from flask import make_response, jsonify, current_app, abort, session, send_file, after_this_request
 from urllib.parse import unquote
 
 from server.common.config.client_config import get_client_config
@@ -24,6 +25,7 @@ from server.common.errors import (
 )
 from server.common.genesets import summarizeQueryHash
 from server.common.fbs.matrix import decode_matrix_fbs
+from server.app.session import get_user_id
 
 
 def abort_and_log(code, logmsg, loglevel=logging.DEBUG, include_exc_info=False):
@@ -38,6 +40,34 @@ def abort_and_log(code, logmsg, loglevel=logging.DEBUG, include_exc_info=False):
     current_app.logger.log(loglevel, logmsg, exc_info=exc_info)
     # Do NOT send log message to HTTP response.
     return abort(code)
+
+
+def json_error_response(code, message, error_type="error", loglevel=logging.DEBUG, include_exc_info=False):
+    """
+    Log an error and return a small JSON response suitable for user-facing
+    client errors. Unlike abort_and_log(), this intentionally sends the
+    sanitized message to the browser.
+    """
+    if include_exc_info:
+        exc_info = sys.exc_info()
+    else:
+        exc_info = False
+    current_app.logger.log(loglevel, message, exc_info=exc_info)
+    response = make_response(
+        jsonify(
+            {
+                "error": {
+                    "status": int(code),
+                    "type": error_type,
+                    "message": message,
+                },
+                "message": message,
+            }
+        ),
+        code,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def _query_parameter_to_filter(args):
@@ -280,6 +310,119 @@ def diffexp_obs_post(request, data_adaptor):
         current_app.logger.warning(JSON_NaN_to_num_warning_msg)
         raise
 
+
+
+def recluster_obs_jobs_post(request, data_adaptor):
+    args = request.get_json() or {}
+    user_id = get_user_id(session)
+    try:
+        job = data_adaptor.recluster_obs_start(user_id, args)
+        response = make_response(jsonify(job), HTTPStatus.ACCEPTED)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    except (ValueError, KeyError, FilterError, ExceedsLimitError) as e:
+        return json_error_response(
+            HTTPStatus.BAD_REQUEST,
+            str(e),
+            error_type=e.__class__.__name__,
+            include_exc_info=True,
+        )
+
+
+def recluster_obs_job_get(request, data_adaptor, job_id):
+    user_id = get_user_id(session)
+    try:
+        job = data_adaptor.recluster_obs_job_get(user_id, job_id)
+        response = make_response(jsonify(job), HTTPStatus.OK)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    except KeyError as e:
+        return json_error_response(
+            HTTPStatus.NOT_FOUND,
+            str(e),
+            error_type=e.__class__.__name__,
+            include_exc_info=True,
+        )
+
+
+def recluster_obs_result_layout_get(request, data_adaptor, result_id):
+    fields = request.args.getlist("layout-name", None)
+    if len(fields) != 1:
+        return json_error_response(HTTPStatus.BAD_REQUEST, "exactly one layout-name must be requested")
+
+    preferred_mimetype = request.accept_mimetypes.best_match(["application/octet-stream"])
+    if preferred_mimetype != "application/octet-stream":
+        return abort(HTTPStatus.NOT_ACCEPTABLE)
+
+    user_id = get_user_id(session)
+    try:
+        fbs = data_adaptor.recluster_layout_to_fbs_matrix(user_id, result_id, fields[0])
+        response = make_response(fbs, HTTPStatus.OK, {"Content-Type": "application/octet-stream"})
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    except KeyError as e:
+        return json_error_response(
+            HTTPStatus.NOT_FOUND,
+            str(e),
+            error_type=e.__class__.__name__,
+            include_exc_info=True,
+        )
+
+
+def recluster_obs_result_annotation_get(request, data_adaptor, result_id):
+    fields = request.args.getlist("annotation-name", None)
+    if len(fields) != 1:
+        return json_error_response(HTTPStatus.BAD_REQUEST, "exactly one annotation-name must be requested")
+
+    preferred_mimetype = request.accept_mimetypes.best_match(["application/octet-stream"])
+    if preferred_mimetype != "application/octet-stream":
+        return abort(HTTPStatus.NOT_ACCEPTABLE)
+
+    user_id = get_user_id(session)
+    try:
+        fbs = data_adaptor.recluster_annotation_to_fbs_matrix(user_id, result_id, fields[0])
+        response = make_response(fbs, HTTPStatus.OK, {"Content-Type": "application/octet-stream"})
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    except KeyError as e:
+        return json_error_response(
+            HTTPStatus.NOT_FOUND,
+            str(e),
+            error_type=e.__class__.__name__,
+            include_exc_info=True,
+        )
+
+
+def recluster_obs_result_h5ad_get(request, data_adaptor, result_id):
+    user_id = get_user_id(session)
+    try:
+        path, download_name = data_adaptor.recluster_export_h5ad(user_id, result_id)
+
+        @after_this_request
+        def cleanup_tmp_file(response):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            return response
+
+        response = send_file(path, as_attachment=True, download_name=download_name, mimetype="application/octet-stream")
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    except KeyError as e:
+        return json_error_response(
+            HTTPStatus.NOT_FOUND,
+            str(e),
+            error_type=e.__class__.__name__,
+            include_exc_info=True,
+        )
+    except ValueError as e:
+        return json_error_response(
+            HTTPStatus.BAD_REQUEST,
+            str(e),
+            error_type=e.__class__.__name__,
+            include_exc_info=True,
+        )
 
 def layout_obs_get(request, data_adaptor):
     fields = request.args.getlist("layout-name", None)

@@ -76,6 +76,10 @@ def get_client_config(app_config, data_adaptor):
     config["limits"] = {
         "column_request_max": server_config.limits__column_request_max,
         "diffexp_cellcount_max": server_config.limits__diffexp_cellcount_max,
+        "recluster_cellcount_min": server_config.limits__recluster_cellcount_min,
+        "recluster_cellcount_max": server_config.limits__recluster_cellcount_max,
+        "recluster_gene_count_max": server_config.limits__recluster_gene_count_max,
+        "recluster_expression_values_max": server_config.limits__recluster_expression_values_max,
     }
 
     return client_config

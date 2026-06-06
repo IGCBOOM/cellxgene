@@ -25,6 +25,10 @@ const skipOnActions = new Set([
 
   "request user defined gene success",
 
+  "recluster: started",
+  "recluster: status",
+  "recluster: error",
+
   "category value mouse hover start",
   "category value mouse hover end",
 
@@ -94,6 +98,7 @@ const saveOnActions = new Set([
   "set clip quantiles",
 
   "set layout choice",
+  "recluster: success",
   "change graph interaction mode",
 
   // user editable annotations

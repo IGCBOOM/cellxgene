@@ -182,7 +182,7 @@ class DataAdaptor(metaclass=ABCMeta):
 
             if anno_data.dtype.name in ["boolean", "category", "object"]:
                 values = v.get("values", [])
-                key_idx = np.in1d(anno_data, values)
+                key_idx = np.isin(anno_data, values)
                 mask = np.logical_and(mask, key_idx)
 
             else:
@@ -351,8 +351,8 @@ class DataAdaptor(metaclass=ABCMeta):
             max = np.nanmax(embedding, axis=0)
         except RuntimeError:
             # indicates entire array was NaN, which should propagate
-            min = np.NaN
-            max = np.NaN
+            min = np.nan
+            max = np.nan
 
         scale = np.amax(max - min)
         normalized_layout = (embedding - min) / scale

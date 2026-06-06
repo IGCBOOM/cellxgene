@@ -49,6 +49,13 @@ class AnnoMatrixView extends AnnoMatrix {
     return newAnnoMatrix;
   }
 
+  addObsAnnotation(colSchema) {
+    const newAnnoMatrix = this._clone();
+    newAnnoMatrix.viewOf = this.viewOf.addObsAnnotation(colSchema);
+    newAnnoMatrix.schema = newAnnoMatrix.viewOf.schema;
+    return newAnnoMatrix;
+  }
+
   renameObsColumn(oldCol, newCol) {
     const newAnnoMatrix = this._clone();
     newAnnoMatrix.viewOf = this.viewOf.renameObsColumn(oldCol, newCol);

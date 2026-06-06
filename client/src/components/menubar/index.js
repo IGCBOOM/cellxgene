@@ -8,6 +8,7 @@ import actions from "../../actions";
 import Clip from "./clip";
 
 import Subset from "./subset";
+import Recluster from "./recluster";
 import UndoRedoReset from "./undoRedo";
 import DiffexpButtons from "./diffexpButtons";
 import { getEmbSubsetView } from "../../util/stateManager/viewStackHelpers";
@@ -312,6 +313,7 @@ class MenuBar extends React.PureComponent {
           handleSubset={this.handleSubset}
           handleSubsetReset={this.handleSubsetReset}
         />
+        <Recluster />
         {disableDiffexp ? null : <DiffexpButtons />}
       </div>
     );

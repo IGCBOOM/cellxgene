@@ -82,9 +82,9 @@ def handle_request_exception(error):
 
 def rest_get_data_adaptor(func):
     @wraps(func)
-    def wrapped_function(self):
+    def wrapped_function(self, *args, **kwargs):
         try:
-            return func(self, current_app.data_adaptor)
+            return func(self, current_app.data_adaptor, *args, **kwargs)
         except DatasetAccessError as e:
             return common_rest.abort_and_log(
                 e.status_code, f"Invalid dataset: {e.message}", loglevel=logging.INFO, include_exc_info=True
@@ -160,6 +160,41 @@ class DiffExpObsAPI(Resource):
         return common_rest.diffexp_obs_post(request, data_adaptor)
 
 
+
+class ReclusterObsJobsAPI(Resource):
+    @cache_control(no_store=True)
+    @rest_get_data_adaptor
+    def post(self, data_adaptor):
+        return common_rest.recluster_obs_jobs_post(request, data_adaptor)
+
+
+class ReclusterObsJobAPI(Resource):
+    @cache_control(no_store=True)
+    @rest_get_data_adaptor
+    def get(self, data_adaptor, job_id):
+        return common_rest.recluster_obs_job_get(request, data_adaptor, job_id)
+
+
+class ReclusterObsResultLayoutAPI(Resource):
+    @cache_control(no_store=True)
+    @rest_get_data_adaptor
+    def get(self, data_adaptor, result_id):
+        return common_rest.recluster_obs_result_layout_get(request, data_adaptor, result_id)
+
+
+class ReclusterObsResultAnnotationAPI(Resource):
+    @cache_control(no_store=True)
+    @rest_get_data_adaptor
+    def get(self, data_adaptor, result_id):
+        return common_rest.recluster_obs_result_annotation_get(request, data_adaptor, result_id)
+
+
+class ReclusterObsResultH5ADAPI(Resource):
+    @cache_control(no_store=True)
+    @rest_get_data_adaptor
+    def get(self, data_adaptor, result_id):
+        return common_rest.recluster_obs_result_h5ad_get(request, data_adaptor, result_id)
+
 class LayoutObsAPI(Resource):
     @cache_control(public=True, max_age=ONE_WEEK)
     @rest_get_data_adaptor
@@ -221,6 +256,11 @@ def get_api_dataroot_resources(bp_dataroot):
     add_resource(ColorsAPI, "/colors")
     # Computation routes
     add_resource(DiffExpObsAPI, "/diffexp/obs")
+    add_resource(ReclusterObsJobsAPI, "/recluster/obs/jobs")
+    add_resource(ReclusterObsJobAPI, "/recluster/obs/jobs/<string:job_id>")
+    add_resource(ReclusterObsResultLayoutAPI, "/recluster/obs/results/<string:result_id>/layout")
+    add_resource(ReclusterObsResultAnnotationAPI, "/recluster/obs/results/<string:result_id>/annotation")
+    add_resource(ReclusterObsResultH5ADAPI, "/recluster/obs/results/<string:result_id>/h5ad")
     add_resource(LayoutObsAPI, "/layout/obs")
     return api
 

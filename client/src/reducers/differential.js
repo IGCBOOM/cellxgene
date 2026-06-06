@@ -38,6 +38,7 @@ const Differential = (
       };
     case "reset subset":
     case "subset to selection":
+    case "recluster: success":
       return {
         ...state,
         celllist1: null,

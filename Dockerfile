@@ -1,11 +1,12 @@
-FROM ubuntu:bionic
+FROM python:3.12-slim
 
 ENV LC_ALL=C.UTF-8
 ENV LANG=C.UTF-8
 
 RUN apt-get update && \
-    apt-get install -y build-essential libxml2-dev python3-dev python3-pip zlib1g-dev python3-requests python3-aiohttp && \
-    python3 -m pip install --upgrade pip && \
-    pip3 install cellxgene
+    apt-get install -y --no-install-recommends build-essential libxml2-dev zlib1g-dev && \
+    rm -rf /var/lib/apt/lists/* && \
+    python -m pip install --upgrade pip && \
+    pip install cellxgene
 
 ENTRYPOINT ["cellxgene"]

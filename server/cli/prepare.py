@@ -176,11 +176,11 @@ def prepare(
     def run_neighbors(adata):
         sc.pp.neighbors(adata)
 
-    def run_louvain(adata):
-        sc.tl.louvain(adata)
+    def run_leiden(adata):
+        sc.tl.leiden(adata)
 
     def run_embedding(adata):
-        if len(unique(adata.obs["louvain"].values)) < 10:
+        if len(unique(adata.obs["leiden"].values)) < 10:
             palette = "tab10"
         else:
             palette = "tab20"
@@ -188,12 +188,12 @@ def prepare(
         if "umap" in embedding:
             sc.tl.umap(adata)
             if plotting:
-                sc.pl.umap(adata, color="louvain", palette=palette, save="_louvain")
+                sc.pl.umap(adata, color="leiden", palette=palette, save="_leiden")
 
         if "tsne" in embedding:
             sc.tl.tsne(adata)
             if plotting:
-                sc.pl.tsne(adata, color="louvain", palette=palette, save="_louvain")
+                sc.pl.tsne(adata, color="leiden", palette=palette, save="_leiden")
 
     def show_step(item):
         if not skip_qc:
@@ -206,13 +206,13 @@ def prepare(
             "run_recipe": f'Running preprocessing recipe "{recipe}"',
             "run_pca": "Running PCA",
             "run_neighbors": "Calculating neighbors",
-            "run_louvain": "Calculating clusters",
+            "run_leiden": "Calculating clusters",
             "run_embedding": "Computing embedding",
         }
         if item is not None:
             return names[item.__name__]
 
-    steps = [calculate_qc_metrics, make_sparse, run_recipe, run_pca, run_neighbors, run_louvain, run_embedding]
+    steps = [calculate_qc_metrics, make_sparse, run_recipe, run_pca, run_neighbors, run_leiden, run_embedding]
 
     click.echo(f"[cellxgene] Loading data from {data}, please wait...")
     adata = load_data(data)

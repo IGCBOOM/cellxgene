@@ -43,6 +43,14 @@ const ColorsReducer = (
       };
     }
 
+    case "recluster: success": {
+      return {
+        ...state,
+        colorMode: "color by categorical metadata",
+        colorAccessor: action.clusterName,
+      };
+    }
+
     case "reset colorscale": {
       return {
         ...state,

@@ -316,6 +316,18 @@ export default class AnnoMatrix {
   }
 
   // eslint-disable-next-line class-methods-use-this, no-unused-vars -- make sure subclass implements
+  addObsAnnotation(colSchema) {
+    /*
+    Add a read-only OBS annotation served by the backend. This is used for
+    generated analysis results, such as reclustered Leiden labels, where the
+    schema should update but the values are fetched from the server.
+
+    Returns a new AnnoMatrix.
+    */
+    _subclassResponsibility();
+  }
+
+  // eslint-disable-next-line class-methods-use-this, no-unused-vars -- make sure subclass implements
   addObsColumn(colSchema, Ctor, value) {
     /*
     Add a new writable OBS annotation column, with the caller-specified schema, initial value

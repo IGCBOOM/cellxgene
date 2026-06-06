@@ -35,6 +35,17 @@ server:
   limits:
     column_request_max: 32
     diffexp_cellcount_max: null
+    recluster_cellcount_min: 10
+    recluster_cellcount_max: 100000
+    # Expression-gene reclustering recomputes PCA from selected expression values.
+    # Use recluster_expression_values_max as the main memory guardrail, because
+    # all-gene mode can legitimately need many genes for small cell selections.
+    # Set either value to null to disable that specific limit.
+    recluster_gene_count_max: null
+    recluster_expression_values_max: 100000000
+    recluster_concurrent_jobs: 1
+    recluster_results_per_session: 5
+    recluster_result_ttl_seconds: 3600
 
 
 dataset:

@@ -30,11 +30,55 @@ export function catchErrorsWrap(fn, dispatchToUser = false) {
   };
 }
 
+function getHeader(headers, name) {
+  if (!headers) return null;
+  if (typeof headers.get === "function") return headers.get(name);
+  return headers[name] || headers[name.toLowerCase()] || null;
+}
+
+function getErrorMessageFromPayload(payload) {
+  if (!payload) return null;
+  if (typeof payload === "string") return payload;
+
+  const { error, message, detail, title } = payload;
+  if (typeof error === "string") return error;
+  if (error && typeof error.message === "string") return error.message;
+  if (typeof message === "string") return message;
+  if (typeof detail === "string") return detail;
+  if (typeof title === "string") return title;
+  return null;
+}
+
+async function readErrorMessage(res) {
+  const fallback = `Unexpected HTTP response ${res.status}, ${res.statusText}`;
+  const contentType = res.headers.get("Content-Type") || "";
+
+  try {
+    if (contentType.includes("application/json")) {
+      const payload = await res.clone().json();
+      return getErrorMessageFromPayload(payload) || fallback;
+    }
+
+    if (!contentType.includes("text/html")) {
+      const text = await res.clone().text();
+      const trimmed = text.trim();
+      if (trimmed.length) {
+        return trimmed.length > 500 ? `${trimmed.slice(0, 500)}...` : trimmed;
+      }
+    }
+  } catch (error) {
+    // Fall through to the generic message.
+  }
+
+  return fallback;
+}
+
 /**
  * Wrapper to perform async fetch with some modest error handling
  * and decoding.  Arguments are identical to standard fetch.
  */
 export const doFetch = async (url, init = {}) => {
+  let res;
   try {
     // add defaults to the fetch init param.
     init = {
@@ -42,34 +86,40 @@ export const doFetch = async (url, init = {}) => {
       credentials: "include",
       ...init,
     };
-    const acceptType = init.headers?.get("Accept");
-    const res = await fetch(url, init);
-    if (
-      res.ok &&
-      (!acceptType || res.headers.get("Content-Type").includes(acceptType))
-    ) {
-      return res;
-    }
-
-    // else an error
-    const msg = `Unexpected HTTP response ${res.status}, ${res.statusText}`;
-    dispatchNetworkErrorMessageToUser(msg);
-    throw new Error(msg);
+    res = await fetch(url, init);
   } catch (e) {
-    // network error
+    // fetch() only rejects for transport/network failures, not HTTP 4xx/5xx.
     const msg = "Unexpected HTTP error";
     dispatchNetworkErrorMessageToUser(msg);
+    e.userMessageDisplayed = true;
     throw e;
   }
+
+  const acceptType = getHeader(init.headers, "Accept");
+  const contentType = res.headers.get("Content-Type") || "";
+  if (res.ok && (!acceptType || contentType.includes(acceptType))) {
+    return res;
+  }
+
+  const msg = await readErrorMessage(res);
+  dispatchNetworkErrorMessageToUser(msg);
+  const error = new Error(msg);
+  error.status = res.status;
+  error.statusText = res.statusText;
+  error.url = url;
+  error.userMessageDisplayed = true;
+  throw error;
 };
 
 /*
 Wrapper to perform an async fetch and JSON decode response.
 */
 export const doJsonRequest = async (url, init = {}) => {
+  const headers = new Headers(init.headers || {});
+  headers.set("Accept", "application/json");
   const res = await doFetch(url, {
     ...init,
-    headers: new Headers({ Accept: "application/json" }),
+    headers,
   });
   return res.json();
 };
@@ -78,9 +128,11 @@ export const doJsonRequest = async (url, init = {}) => {
 Wrapper to perform an async fetch for binary data.
 */
 export const doBinaryRequest = async (url, init = {}) => {
+  const headers = new Headers(init.headers || {});
+  headers.set("Accept", "application/octet-stream");
   const res = await doFetch(url, {
     ...init,
-    headers: new Headers({ Accept: "application/octet-stream" }),
+    headers,
   });
   return res.arrayBuffer();
 };

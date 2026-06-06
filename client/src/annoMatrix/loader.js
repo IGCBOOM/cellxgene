@@ -134,6 +134,27 @@ export default class AnnoMatrixLoader extends AnnoMatrix {
     return newAnnoMatrix;
   }
 
+  addObsAnnotation(colSchema) {
+    /*
+    Add a read-only obs annotation whose values are served by the backend.
+    Unlike addObsColumn(), this does not initialize client-side writable data.
+    */
+    const colName = colSchema.name;
+    if (
+      _getColumnSchema(this.schema, "obs", colName) ||
+      this._cache.obs.hasCol(colName)
+    ) {
+      throw new Error("column already exists");
+    }
+
+    const newAnnoMatrix = this._clone();
+    newAnnoMatrix.schema = addObsAnnoColumn(this.schema, colName, {
+      ...colSchema,
+      writable: false,
+    });
+    return newAnnoMatrix;
+  }
+
   renameObsColumn(oldCol, newCol) {
     /*
     Rename the obs oldColName to newColName.  oldCol must be writable.
@@ -242,7 +263,7 @@ export default class AnnoMatrixLoader extends AnnoMatrix {
     switch (field) {
       case "obs":
       case "var": {
-        doRequest = _obsOrVarLoader(this.baseURL, field, query);
+        doRequest = _obsOrVarLoader(this.baseURL, field, query, this.schema);
         break;
       }
       case "X": {
@@ -250,7 +271,7 @@ export default class AnnoMatrixLoader extends AnnoMatrix {
         break;
       }
       case "emb": {
-        doRequest = _embLoader(this.baseURL, field, query);
+        doRequest = _embLoader(this.baseURL, field, query, this.schema);
         priority = 0; // high prio load for embeddings
         break;
       }
@@ -291,8 +312,29 @@ function _writableCategoryTypeCheck(colSchema) {
   }
 }
 
-function _embLoader(baseURL, _field, query) {
+function _reclusterURLForQuery(baseURL, field, query, schema) {
+  const colSchema = _getColumnSchema(schema, field, query);
+  const resultId = colSchema?.reclusterResultId;
+  if (!resultId) return null;
+
+  if (field === "emb") {
+    const urlQuery = _urlEncodeLabelQuery("layout-name", query);
+    return `${baseURL}recluster/obs/results/${resultId}/layout?${urlQuery}`;
+  }
+
+  if (field === "obs") {
+    const urlQuery = _urlEncodeLabelQuery("annotation-name", query);
+    return `${baseURL}recluster/obs/results/${resultId}/annotation?${urlQuery}`;
+  }
+
+  return null;
+}
+
+function _embLoader(baseURL, _field, query, schema) {
   _expectSimpleQuery(query);
+
+  const dynamicUrl = _reclusterURLForQuery(baseURL, "emb", query, schema);
+  if (dynamicUrl) return () => doBinaryRequest(dynamicUrl);
 
   const urlBase = `${baseURL}layout/obs`;
   const urlQuery = _urlEncodeLabelQuery("layout-name", query);
@@ -300,8 +342,11 @@ function _embLoader(baseURL, _field, query) {
   return () => doBinaryRequest(url);
 }
 
-function _obsOrVarLoader(baseURL, field, query) {
+function _obsOrVarLoader(baseURL, field, query, schema) {
   _expectSimpleQuery(query);
+
+  const dynamicUrl = _reclusterURLForQuery(baseURL, field, query, schema);
+  if (dynamicUrl) return () => doBinaryRequest(dynamicUrl);
 
   const urlBase = `${baseURL}annotations/${field}`;
   const urlQuery = _urlEncodeLabelQuery("annotation-name", query);

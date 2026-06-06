@@ -40,6 +40,13 @@ class ServerConfig(BaseConfig):
 
             self.limits__diffexp_cellcount_max = default_config["limits"]["diffexp_cellcount_max"]
             self.limits__column_request_max = default_config["limits"]["column_request_max"]
+            self.limits__recluster_cellcount_min = default_config["limits"]["recluster_cellcount_min"]
+            self.limits__recluster_cellcount_max = default_config["limits"]["recluster_cellcount_max"]
+            self.limits__recluster_gene_count_max = default_config["limits"]["recluster_gene_count_max"]
+            self.limits__recluster_expression_values_max = default_config["limits"]["recluster_expression_values_max"]
+            self.limits__recluster_concurrent_jobs = default_config["limits"]["recluster_concurrent_jobs"]
+            self.limits__recluster_results_per_session = default_config["limits"]["recluster_results_per_session"]
+            self.limits__recluster_result_ttl_seconds = default_config["limits"]["recluster_result_ttl_seconds"]
 
         except KeyError as e:
             raise ConfigurationError(f"Unexpected config: {str(e)}")
@@ -156,6 +163,13 @@ class ServerConfig(BaseConfig):
     def handle_limits(self):
         self.validate_correct_type_of_configuration_attribute("limits__diffexp_cellcount_max", (type(None), int))
         self.validate_correct_type_of_configuration_attribute("limits__column_request_max", (type(None), int))
+        self.validate_correct_type_of_configuration_attribute("limits__recluster_cellcount_min", int)
+        self.validate_correct_type_of_configuration_attribute("limits__recluster_cellcount_max", (type(None), int))
+        self.validate_correct_type_of_configuration_attribute("limits__recluster_gene_count_max", (type(None), int))
+        self.validate_correct_type_of_configuration_attribute("limits__recluster_expression_values_max", (type(None), int))
+        self.validate_correct_type_of_configuration_attribute("limits__recluster_concurrent_jobs", (type(None), int))
+        self.validate_correct_type_of_configuration_attribute("limits__recluster_results_per_session", (type(None), int))
+        self.validate_correct_type_of_configuration_attribute("limits__recluster_result_ttl_seconds", (type(None), int))
 
     def exceeds_limit(self, limit_name, value):
         limit_value = getattr(self, "limits__" + limit_name, None)

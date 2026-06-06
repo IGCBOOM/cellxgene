@@ -9,7 +9,8 @@ const GraphSelection = (
     case "set clip quantiles":
     case "subset to selection":
     case "reset subset":
-    case "set layout choice": {
+    case "set layout choice":
+    case "recluster: success": {
       return {
         ...state,
         selection: {

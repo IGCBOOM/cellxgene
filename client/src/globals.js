@@ -18,6 +18,12 @@ export const configDefaults = {
   parameters: {
     "disable-diffexp": false,
     "diffexp-may-be-slow": false,
+    "recluster-enabled": false,
+    "recluster-representations": [],
+  },
+  limits: {
+    recluster_gene_count_max: null,
+    recluster_expression_values_max: 100000000,
   },
   links: {},
 };

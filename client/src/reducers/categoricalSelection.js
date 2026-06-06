@@ -16,7 +16,8 @@ const CategoricalSelection = (state, action, nextSharedState) => {
     case "initial data load complete":
     case "subset to selection":
     case "reset subset":
-    case "set clip quantiles": {
+    case "set clip quantiles":
+    case "recluster: success": {
       const { annoMatrix } = nextSharedState;
       const newState = CH.createCategoricalSelection(
         CH.selectableCategoryNames(annoMatrix.schema)

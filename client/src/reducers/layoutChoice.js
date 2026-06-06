@@ -40,11 +40,13 @@ const LayoutChoice = (
       };
     }
 
-    case "set layout choice": {
+    case "set layout choice":
+    case "recluster: success": {
       const { schema } = nextSharedState.annoMatrix;
+      const available = schema.layout.obs.map((v) => v.name).sort();
       const current = action.layoutChoice;
       const currentDimNames = schema.layout.obsByName[current].dims;
-      return { ...state, current, currentDimNames };
+      return { ...state, available, current, currentDimNames };
     }
 
     default: {

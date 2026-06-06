@@ -45,6 +45,12 @@ export default class AnnoMatrixObsCrossfilter {
     return new AnnoMatrixObsCrossfilter(annoMatrix, obsCrossfilter);
   }
 
+  addObsAnnotation(colSchema) {
+    const annoMatrix = this.annoMatrix.addObsAnnotation(colSchema);
+    const obsCrossfilter = this.obsCrossfilter.setData(annoMatrix._cache.obs);
+    return new AnnoMatrixObsCrossfilter(annoMatrix, obsCrossfilter);
+  }
+
   dropObsColumn(col) {
     const annoMatrix = this.annoMatrix.dropObsColumn(col);
     let { obsCrossfilter } = this;
@@ -182,7 +188,10 @@ export default class AnnoMatrixObsCrossfilter {
 		*/
     const { annoMatrix } = this;
     const currentDims = this.obsCrossfilter.dimensionNames();
-    const obsCrossfilter = currentDims.reduce((xfltr, dim) => xfltr.select(dim, { mode: "all" }), this.obsCrossfilter);
+    const obsCrossfilter = currentDims.reduce(
+      (xfltr, dim) => xfltr.select(dim, { mode: "all" }),
+      this.obsCrossfilter
+    );
     return new AnnoMatrixObsCrossfilter(annoMatrix, obsCrossfilter);
   }
 

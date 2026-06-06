@@ -27,7 +27,7 @@ Whether you need to visualize one thousand cells or one million, CELLxGENE Annot
 
 ### Quick start
 
-To install CELLxGENE Annotate you need Python 3.10+. We recommend [installing Annotate into a conda or virtual environment.](https://github.com/chanzuckerberg/cellxgene-documentation/blob/main/desktop/install.md)
+To install CELLxGENE Annotate you need Python 3.12+. We recommend [installing Annotate into a conda or virtual environment.](https://github.com/chanzuckerberg/cellxgene-documentation/blob/main/desktop/install.md)
 
 Install the package.
 
