@@ -6,6 +6,8 @@ import {
 import { AnnoMatrixObsCrossfilter } from "../annoMatrix";
 import { _switchEmbedding } from "./embedding";
 
+const DEFAULT_BLACKLIST_GENES = "MT-*, RPS*, RPL*";
+
 const DEFAULT_RECLUSTER_PARAMS = {
   resolution: 1.0,
   n_neighbors: 15,
@@ -13,8 +15,8 @@ const DEFAULT_RECLUSTER_PARAMS = {
   use_rep: "X_pca",
   min_dist: 0.5,
   random_state: 0,
-  gene_filter_mode: "none",
-  gene_list: "",
+  gene_filter_mode: "blacklist",
+  gene_list: DEFAULT_BLACKLIST_GENES,
   gene_filter_case_sensitive: false,
   gene_filter_log1p: false,
   gene_filter_scale: false,

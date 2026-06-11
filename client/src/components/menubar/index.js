@@ -9,6 +9,8 @@ import Clip from "./clip";
 
 import Subset from "./subset";
 import Recluster from "./recluster";
+import DownloadH5AD from "./downloadH5ad";
+import ScanpyPlot from "./scanpyPlot";
 import UndoRedoReset from "./undoRedo";
 import DiffexpButtons from "./diffexpButtons";
 import { getEmbSubsetView } from "../../util/stateManager/viewStackHelpers";
@@ -46,6 +48,8 @@ import { getEmbSubsetView } from "../../util/stateManager/viewStackHelpers";
     tosURL: state.config?.parameters?.about_legal_tos,
     privacyURL: state.config?.parameters?.about_legal_privacy,
     categoricalSelection: state.categoricalSelection,
+    exportH5adLoading: state.exportH5ad.loading,
+    currentViewCellCount: annoMatrix.nObs,
   };
 })
 class MenuBar extends React.PureComponent {
@@ -192,6 +196,11 @@ class MenuBar extends React.PureComponent {
     dispatch(actions.resetSubsetAction());
   };
 
+  handleDownloadH5AD = () => {
+    const { dispatch } = this.props;
+    dispatch(actions.downloadCurrentViewH5ADAction());
+  };
+
   render() {
     const {
       dispatch,
@@ -207,6 +216,8 @@ class MenuBar extends React.PureComponent {
       colorAccessor,
       subsetPossible,
       subsetResetPossible,
+      exportH5adLoading,
+      currentViewCellCount,
     } = this.props;
     const { pendingClipPercentiles } = this.state;
 
@@ -313,6 +324,12 @@ class MenuBar extends React.PureComponent {
           handleSubset={this.handleSubset}
           handleSubsetReset={this.handleSubsetReset}
         />
+        <DownloadH5AD
+          loading={exportH5adLoading}
+          nObs={currentViewCellCount}
+          handleDownload={this.handleDownloadH5AD}
+        />
+        <ScanpyPlot />
         <Recluster />
         {disableDiffexp ? null : <DiffexpButtons />}
       </div>

@@ -20,10 +20,13 @@ export const configDefaults = {
     "diffexp-may-be-slow": false,
     "recluster-enabled": false,
     "recluster-representations": [],
+    "scanpy-plot-enabled": false,
+    "scanpy-plot-definitions": [],
+    "scanpy-de-plot-definitions": [],
   },
   limits: {
     recluster_gene_count_max: null,
-    recluster_expression_values_max: 100000000,
+    recluster_expression_values_max: 500000000,
   },
   links: {},
 };

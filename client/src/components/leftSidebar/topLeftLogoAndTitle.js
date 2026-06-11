@@ -7,6 +7,7 @@ import Truncate from "../util/truncate";
 import InformationMenu from "./infoMenu";
 
 const DATASET_TITLE_FONT_SIZE = 14;
+const PROCESS_MEMORY_POLL_MS = 2000;
 
 @connect((state) => {
   const { corpora_props: corporaProps } = state.config;
@@ -23,6 +24,68 @@ const DATASET_TITLE_FONT_SIZE = 14;
   };
 })
 class LeftSideBar extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = {
+      memoryLabel: null,
+      memoryTitle: null,
+    };
+    this.memoryPollHandle = null;
+    this.isComponentMounted = false;
+  }
+
+  componentDidMount() {
+    this.isComponentMounted = true;
+    this.fetchProcessMemory();
+    this.memoryPollHandle = window.setInterval(
+      this.fetchProcessMemory,
+      PROCESS_MEMORY_POLL_MS
+    );
+  }
+
+  componentWillUnmount() {
+    this.isComponentMounted = false;
+    if (this.memoryPollHandle) {
+      window.clearInterval(this.memoryPollHandle);
+      this.memoryPollHandle = null;
+    }
+  }
+
+  fetchProcessMemory = () => {
+    const url = `${globals.API.prefix}${globals.API.version}server/memory`;
+
+    window
+      .fetch(url, {
+        cache: "no-store",
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+      })
+      .then((response) => {
+        if (!response.ok) throw new Error(response.statusText);
+        return response.json();
+      })
+      .then((payload) => {
+        if (!this.isComponentMounted) return;
+
+        const processRss = payload?.process_rss_human || "unknown";
+        const pid = payload?.pid ? `PID ${payload.pid}` : "server process";
+        const systemUsed = payload?.system_used_human || "unknown";
+        const systemTotal = payload?.system_total_human || "unknown";
+        const systemPercent =
+          typeof payload?.system_percent === "number"
+            ? `${payload.system_percent.toFixed(1)}%`
+            : "unknown";
+
+        this.setState({
+          memoryLabel: `RAM: ${processRss}`,
+          memoryTitle: `${pid}; system RAM: ${systemUsed} / ${systemTotal} (${systemPercent})`,
+        });
+      })
+      .catch(() => {
+        // Memory telemetry is useful but should never interrupt the UI.
+      });
+  };
+
   render() {
     const {
       datasetTitle,
@@ -33,6 +96,7 @@ class LeftSideBar extends React.Component {
       dispatch,
       title,
     } = this.props;
+    const { memoryLabel, memoryTitle } = this.state;
 
     return (
       <div
@@ -47,7 +111,7 @@ class LeftSideBar extends React.Component {
           alignItems: "center",
         }}
       >
-        <div>
+        <div style={{ flex: "0 0 auto" }}>
           <Logo size={28} />
           <span
             style={{
@@ -74,6 +138,24 @@ class LeftSideBar extends React.Component {
             gene
           </span>
         </div>
+        {memoryLabel ? (
+          <span
+            title={memoryTitle}
+            style={{
+              color: globals.darkGrey,
+              flex: "0 0 auto",
+              fontSize: 11,
+              marginLeft: 8,
+              marginRight: 8,
+              position: "relative",
+              top: -2,
+              userSelect: "none",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {memoryLabel}
+          </span>
+        ) : null}
         <div style={{ marginRight: 5, height: "100%" }}>
           <span
             minimal

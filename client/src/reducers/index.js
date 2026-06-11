@@ -12,6 +12,8 @@ import graphSelection from "./graphSelection";
 import colors from "./colors";
 import differential from "./differential";
 import recluster from "./recluster";
+import exportH5ad from "./exportH5ad";
+import scanpyPlot from "./scanpyPlot";
 import layoutChoice from "./layoutChoice";
 import controls from "./controls";
 import annotations from "./annotations";
@@ -40,6 +42,8 @@ const Reducer = undoable(
     ["controls", controls],
     ["differential", differential],
     ["recluster", recluster],
+    ["exportH5ad", exportH5ad],
+    ["scanpyPlot", scanpyPlot],
     ["centroidLabels", centroidLabels],
     ["pointDilation", pointDialation],
     ["autosave", autosave],

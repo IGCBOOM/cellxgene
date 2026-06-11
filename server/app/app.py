@@ -115,6 +115,12 @@ class ConfigAPI(Resource):
         return common_rest.config_get(current_app.app_config, data_adaptor)
 
 
+class ServerMemoryAPI(Resource):
+    @cache_control_always(no_store=True)
+    def get(self):
+        return common_rest.server_memory_get()
+
+
 class AnnotationsObsAPI(Resource):
     @cache_control(public=True, max_age=ONE_WEEK)
     @rest_get_data_adaptor
@@ -195,6 +201,21 @@ class ReclusterObsResultH5ADAPI(Resource):
     def get(self, data_adaptor, result_id):
         return common_rest.recluster_obs_result_h5ad_get(request, data_adaptor, result_id)
 
+
+class ExportCurrentViewH5ADAPI(Resource):
+    @cache_control(no_store=True)
+    @rest_get_data_adaptor
+    def post(self, data_adaptor):
+        return common_rest.export_current_view_h5ad_post(request, data_adaptor)
+
+
+class ScanpyPlotAPI(Resource):
+    @cache_control(no_store=True)
+    @rest_get_data_adaptor
+    def post(self, data_adaptor):
+        return common_rest.scanpy_plot_post(request, data_adaptor)
+
+
 class LayoutObsAPI(Resource):
     @cache_control(public=True, max_age=ONE_WEEK)
     @rest_get_data_adaptor
@@ -246,6 +267,7 @@ def get_api_dataroot_resources(bp_dataroot):
     # Initialization routes
     add_resource(SchemaAPI, "/schema")
     add_resource(ConfigAPI, "/config")
+    add_resource(ServerMemoryAPI, "/server/memory")
     # Data routes
     add_resource(AnnotationsObsAPI, "/annotations/obs")
     add_resource(AnnotationsVarAPI, "/annotations/var")
@@ -261,6 +283,8 @@ def get_api_dataroot_resources(bp_dataroot):
     add_resource(ReclusterObsResultLayoutAPI, "/recluster/obs/results/<string:result_id>/layout")
     add_resource(ReclusterObsResultAnnotationAPI, "/recluster/obs/results/<string:result_id>/annotation")
     add_resource(ReclusterObsResultH5ADAPI, "/recluster/obs/results/<string:result_id>/h5ad")
+    add_resource(ExportCurrentViewH5ADAPI, "/export/h5ad")
+    add_resource(ScanpyPlotAPI, "/plots/scanpy/run")
     add_resource(LayoutObsAPI, "/layout/obs")
     return api
 

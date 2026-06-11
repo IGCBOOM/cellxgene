@@ -156,6 +156,72 @@ def config_get(app_config, data_adaptor):
     return make_response(jsonify(config), HTTPStatus.OK)
 
 
+
+
+def _format_bytes(num_bytes):
+    """Return a compact human-readable byte count."""
+    try:
+        value = float(num_bytes)
+    except (TypeError, ValueError):
+        return "unknown"
+
+    units = ["B", "KB", "MB", "GB", "TB"]
+    unit_idx = 0
+    while value >= 1024 and unit_idx < len(units) - 1:
+        value /= 1024
+        unit_idx += 1
+
+    if unit_idx == 0:
+        return f"{int(value)} {units[unit_idx]}"
+    if value >= 10:
+        return f"{value:.1f} {units[unit_idx]}"
+    return f"{value:.2f} {units[unit_idx]}"
+
+
+def server_memory_get():
+    """Return current RAM usage for the CELLxGENE server process and host."""
+    try:
+        import psutil
+
+        virtual_memory = psutil.virtual_memory()
+        process = psutil.Process(os.getpid())
+        process_memory = process.memory_info()
+        process_rss_bytes = int(process_memory.rss)
+        process_vms_bytes = int(process_memory.vms)
+        system_total_bytes = int(virtual_memory.total)
+        system_available_bytes = int(virtual_memory.available)
+        system_used_bytes = int(virtual_memory.used)
+        system_percent = float(virtual_memory.percent)
+
+        payload = {
+            "pid": os.getpid(),
+            "process_rss_bytes": process_rss_bytes,
+            "process_rss_human": _format_bytes(process_rss_bytes),
+            "process_vms_bytes": process_vms_bytes,
+            "process_vms_human": _format_bytes(process_vms_bytes),
+            "system_total_bytes": system_total_bytes,
+            "system_total_human": _format_bytes(system_total_bytes),
+            "system_available_bytes": system_available_bytes,
+            "system_available_human": _format_bytes(system_available_bytes),
+            "system_used_bytes": system_used_bytes,
+            "system_used_human": _format_bytes(system_used_bytes),
+            "system_percent": system_percent,
+        }
+    except Exception as e:  # pragma: no cover - telemetry must not break app load
+        current_app.logger.debug("Unable to read process memory", exc_info=True)
+        payload = {
+            "pid": os.getpid(),
+            "error": str(e),
+            "process_rss_bytes": None,
+            "process_rss_human": "unknown",
+            "system_percent": None,
+        }
+
+    response = make_response(jsonify(payload), HTTPStatus.OK)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 def annotations_obs_get(request, data_adaptor):
     fields = request.args.getlist("annotation-name", None)
     num_columns_requested = len(data_adaptor.get_obs_keys()) if len(fields) == 0 else len(fields)
@@ -417,6 +483,49 @@ def recluster_obs_result_h5ad_get(request, data_adaptor, result_id):
             include_exc_info=True,
         )
     except ValueError as e:
+        return json_error_response(
+            HTTPStatus.BAD_REQUEST,
+            str(e),
+            error_type=e.__class__.__name__,
+            include_exc_info=True,
+        )
+
+def export_current_view_h5ad_post(request, data_adaptor):
+    user_id = get_user_id(session)
+    args = request.get_json() or {}
+    try:
+        path, download_name = data_adaptor.export_current_view_h5ad(user_id, args)
+
+        @after_this_request
+        def cleanup_tmp_file(response):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            return response
+
+        response = send_file(path, as_attachment=True, download_name=download_name, mimetype="application/octet-stream")
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    except (ValueError, KeyError, FilterError, ExceedsLimitError) as e:
+        return json_error_response(
+            HTTPStatus.BAD_REQUEST,
+            str(e),
+            error_type=e.__class__.__name__,
+            include_exc_info=True,
+        )
+
+
+
+def scanpy_plot_post(request, data_adaptor):
+    user_id = get_user_id(session)
+    args = request.get_json() or {}
+    try:
+        result = data_adaptor.scanpy_plot_run(user_id, args)
+        response = make_response(jsonify(result), HTTPStatus.OK)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    except (ValueError, KeyError, FilterError, ExceedsLimitError) as e:
         return json_error_response(
             HTTPStatus.BAD_REQUEST,
             str(e),

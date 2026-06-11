@@ -1,0 +1,7 @@
+server:
+  limits:
+    recluster_cellcount_max: 200000
+    recluster_gene_count_max: null
+    recluster_expression_values_max: 500000000
+    recluster_results_per_session: 5
+    recluster_result_ttl_seconds: 3600

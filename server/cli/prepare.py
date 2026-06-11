@@ -177,7 +177,12 @@ def prepare(
         sc.pp.neighbors(adata)
 
     def run_leiden(adata):
-        sc.tl.leiden(adata)
+        sc.tl.leiden(
+            adata,
+            flavor="igraph",
+            n_iterations=2,
+            directed=False,
+        )
 
     def run_embedding(adata):
         if len(unique(adata.obs["leiden"].values)) < 10:

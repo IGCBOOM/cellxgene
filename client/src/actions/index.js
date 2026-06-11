@@ -12,6 +12,8 @@ import * as viewActions from "./viewStack";
 import * as embActions from "./embedding";
 import * as genesetActions from "./geneset";
 import * as reclusterActions from "./recluster";
+import * as exportH5adActions from "./exportH5ad";
+import * as scanpyPlotActions from "./scanpyPlot";
 
 function setGlobalConfig(config) {
   /**
@@ -271,6 +273,9 @@ export default {
   layoutChoiceAction: embActions.layoutChoiceAction,
   setCellSetFromSelection: selnActions.setCellSetFromSelection,
   reclusterSelectionAction: reclusterActions.reclusterSelectionAction,
+  downloadCurrentViewH5ADAction:
+    exportH5adActions.downloadCurrentViewH5ADAction,
+  runScanpyPlotAction: scanpyPlotActions.runScanpyPlotAction,
   genesetDelete: genesetActions.genesetDelete,
   genesetAddGenes: genesetActions.genesetAddGenes,
   genesetDeleteGenes: genesetActions.genesetDeleteGenes,

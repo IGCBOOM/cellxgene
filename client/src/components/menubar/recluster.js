@@ -1,10 +1,28 @@
 import React from "react";
 import { connect } from "react-redux";
-import { AnchorButton, Button, ButtonGroup, Callout, Checkbox, Classes, FormGroup, H5, HTMLSelect, NumericInput, Popover, Position, ProgressBar, TextArea, Tooltip } from "@blueprintjs/core";
+import {
+  AnchorButton,
+  Button,
+  ButtonGroup,
+  Callout,
+  Checkbox,
+  Classes,
+  FormGroup,
+  H5,
+  HTMLSelect,
+  NumericInput,
+  Popover,
+  Position,
+  ProgressBar,
+  TextArea,
+  Tooltip,
+} from "@blueprintjs/core";
 
 import * as globals from "../../globals";
 import styles from "./menubar.css";
 import actions from "../../actions";
+
+const DEFAULT_BLACKLIST_GENES = "MT-*, RPS*, RPL*";
 
 const DEFAULT_PARAMS = {
   resolution: 1.0,
@@ -13,8 +31,8 @@ const DEFAULT_PARAMS = {
   use_rep: "X_pca",
   min_dist: 0.5,
   random_state: 0,
-  gene_filter_mode: "none",
-  gene_list: "",
+  gene_filter_mode: "blacklist",
+  gene_list: DEFAULT_BLACKLIST_GENES,
   gene_filter_case_sensitive: false,
   gene_filter_log1p: false,
   gene_filter_scale: false,
@@ -22,6 +40,17 @@ const DEFAULT_PARAMS = {
 
 function hasGeneTerms(text) {
   return !!text && text.split(/[\s,;]+/).some((term) => term.trim().length > 0);
+}
+
+function isFiniteTextNumber(text) {
+  if (text === null || text === undefined) return false;
+  const trimmed = String(text).trim();
+  if (!trimmed || trimmed === "." || trimmed === "-") return false;
+  return Number.isFinite(Number(trimmed));
+}
+
+function textNumberValue(text) {
+  return Number(String(text).trim());
 }
 
 @connect((state) => {
@@ -56,6 +85,10 @@ class Recluster extends React.PureComponent {
         ...DEFAULT_PARAMS,
         use_rep: useRep,
       },
+      paramText: {
+        resolution: String(DEFAULT_PARAMS.resolution),
+        min_dist: String(DEFAULT_PARAMS.min_dist),
+      },
     };
   }
 
@@ -84,6 +117,49 @@ class Recluster extends React.PureComponent {
     }));
   };
 
+  setDecimalParam = (name, value, valueAsString) => {
+    const text = valueAsString === undefined ? String(value) : valueAsString;
+    this.setState((prev) => {
+      const nextParams = Number.isFinite(value)
+        ? { ...prev.params, [name]: value }
+        : prev.params;
+      return {
+        params: nextParams,
+        paramText: { ...prev.paramText, [name]: text },
+      };
+    });
+  };
+
+  commitDecimalParam = (name, min) => {
+    this.setState((prev) => {
+      const text = prev.paramText[name];
+      if (!isFiniteTextNumber(text)) {
+        return {
+          paramText: { ...prev.paramText, [name]: String(prev.params[name]) },
+        };
+      }
+
+      const parsed = Math.max(min, textNumberValue(text));
+      return {
+        params: { ...prev.params, [name]: parsed },
+        paramText: { ...prev.paramText, [name]: String(parsed) },
+      };
+    });
+  };
+
+  paramsForSubmit = () => {
+    const { params, paramText } = this.state;
+    const nextParams = { ...params };
+
+    ["resolution", "min_dist"].forEach((name) => {
+      if (isFiniteTextNumber(paramText[name])) {
+        nextParams[name] = textNumberValue(paramText[name]);
+      }
+    });
+
+    return nextParams;
+  };
+
   setTextParam = (name, value) => {
     this.setState((prev) => ({
       params: { ...prev.params, [name]: value },
@@ -105,15 +181,24 @@ class Recluster extends React.PureComponent {
 
   setGeneFilterMode = (event) => {
     const geneFilterMode = event.currentTarget.value;
-    this.setState((prev) => ({
-      params: { ...prev.params, gene_filter_mode: geneFilterMode },
-    }));
+    this.setState((prev) => {
+      const nextParams = { ...prev.params, gene_filter_mode: geneFilterMode };
+      if (
+        geneFilterMode === "whitelist" &&
+        prev.params.gene_filter_mode === "blacklist" &&
+        prev.params.gene_list === DEFAULT_BLACKLIST_GENES
+      ) {
+        nextParams.gene_list = "";
+      } else if (geneFilterMode === "blacklist" && !prev.params.gene_list) {
+        nextParams.gene_list = DEFAULT_BLACKLIST_GENES;
+      }
+      return { params: nextParams };
+    });
   };
 
   recluster = () => {
     const { dispatch } = this.props;
-    const { params } = this.state;
-    dispatch(actions.reclusterSelectionAction(params));
+    dispatch(actions.reclusterSelectionAction(this.paramsForSubmit()));
   };
 
   renderStatus() {
@@ -159,13 +244,19 @@ class Recluster extends React.PureComponent {
       maxGeneCount,
       maxExpressionValues,
     } = this.props;
-    const { params } = this.state;
+    const { params, paramText } = this.state;
     const repChoices = representations.length ? representations : ["X_pca"];
     const usingExpressionGenes = params.gene_filter_mode !== "none";
     const usingGeneList = ["whitelist", "blacklist"].includes(
       params.gene_filter_mode
     );
     const missingGeneList = usingGeneList && !hasGeneTerms(params.gene_list);
+    const invalidResolution =
+      !isFiniteTextNumber(paramText.resolution) ||
+      textNumberValue(paramText.resolution) < 0.01;
+    const invalidMinDist =
+      !isFiniteTextNumber(paramText.min_dist) ||
+      textNumberValue(paramText.min_dist) < 0;
 
     return (
       <div style={{ width: 340, padding: 12 }}>
@@ -227,8 +318,8 @@ class Recluster extends React.PureComponent {
                     value={params.gene_list}
                     placeholder={
                       params.gene_filter_mode === "blacklist"
-                        ? "MT-*\nRPL*\nRPS*"
-                        : "MS4A1\nCD79A\nCD74"
+                        ? DEFAULT_BLACKLIST_GENES
+                        : "MS4A1, CD79A, CD74"
                     }
                     onChange={(event) =>
                       this.setTextParam("gene_list", event.currentTarget.value)
@@ -276,13 +367,23 @@ class Recluster extends React.PureComponent {
           </>
         ) : null}
 
-        <FormGroup label="Resolution">
+        <FormGroup
+          label="Resolution"
+          intent={invalidResolution ? "danger" : undefined}
+          helperText={
+            invalidResolution ? "Enter a decimal number >= 0.01." : undefined
+          }
+        >
           <NumericInput
             fill
+            allowNumericCharactersOnly={false}
             min={0.01}
             stepSize={0.1}
-            value={params.resolution}
-            onValueChange={(value) => this.setNumberParam("resolution", value)}
+            value={paramText.resolution}
+            onBlur={() => this.commitDecimalParam("resolution", 0.01)}
+            onValueChange={(value, valueAsString) =>
+              this.setDecimalParam("resolution", value, valueAsString)
+            }
           />
         </FormGroup>
 
@@ -318,13 +419,23 @@ class Recluster extends React.PureComponent {
           />
         </FormGroup>
 
-        <FormGroup label="UMAP min_dist">
+        <FormGroup
+          label="UMAP min_dist"
+          intent={invalidMinDist ? "danger" : undefined}
+          helperText={
+            invalidMinDist ? "Enter a decimal number >= 0." : undefined
+          }
+        >
           <NumericInput
             fill
+            allowNumericCharactersOnly={false}
             min={0}
             stepSize={0.1}
-            value={params.min_dist}
-            onValueChange={(value) => this.setNumberParam("min_dist", value)}
+            value={paramText.min_dist}
+            onBlur={() => this.commitDecimalParam("min_dist", 0)}
+            onValueChange={(value, valueAsString) =>
+              this.setDecimalParam("min_dist", value, valueAsString)
+            }
           />
         </FormGroup>
 
@@ -346,7 +457,12 @@ class Recluster extends React.PureComponent {
         <Button
           intent="primary"
           loading={recluster.loading}
-          disabled={recluster.loading || missingGeneList}
+          disabled={
+            recluster.loading ||
+            missingGeneList ||
+            invalidResolution ||
+            invalidMinDist
+          }
           onClick={this.recluster}
           text="Run reclustering"
         />

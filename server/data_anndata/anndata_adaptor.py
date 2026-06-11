@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import time
@@ -31,6 +32,15 @@ from server.common.compute.recluster import (
     recluster_from_obsm,
     resolve_gene_filter,
 )
+from server.common.compute.scanpy_plots import (
+    DE_GROUP_OBS,
+    PLOT_SELECTION_OBS,
+    SCANPY_PLOT_DEFINITIONS,
+    DE_PLOT_DEFINITIONS,
+    run_differential_expression_plot,
+    run_differential_expression_plot_from_precomputed,
+    run_standard_scanpy_plot,
+)
 
 anndata_version = version.parse(str(importlib.metadata.version('anndata'))).release
 
@@ -50,11 +60,15 @@ class AnndataAdaptor(DataAdaptor):
         self._recluster_results = {}
         self._recluster_lock = RLock()
         self._recluster_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cxg-recluster")
+        self._scanpy_de_results = {}
+        self._scanpy_de_lock = RLock()
         self._load_data(data_locator)
         self._validate_and_initialize()
 
     def cleanup(self):
         self._recluster_executor.shutdown(wait=False, cancel_futures=True)
+        with self._scanpy_de_lock:
+            self._scanpy_de_results.clear()
 
     @staticmethod
     def pre_load_validation(data_locator):
@@ -240,6 +254,9 @@ class AnndataAdaptor(DataAdaptor):
         self.parameters.update({
             "recluster-enabled": True,
             "recluster-representations": self.get_recluster_representations(),
+            "scanpy-plot-enabled": True,
+            "scanpy-plot-definitions": SCANPY_PLOT_DEFINITIONS,
+            "scanpy-de-plot-definitions": DE_PLOT_DEFINITIONS,
         })
 
         if self.dataset_config.X_approximate_distribution == "auto":
@@ -511,15 +528,389 @@ class AnndataAdaptor(DataAdaptor):
             subset.var["cellxgene_recluster_gene_used"] = used_gene_mask
         subset.uns["cellxgene_recluster"] = {
             "result_id": result.result_id,
-            "params": result.params,
+            "params_json": self._json_dumps_for_h5ad_uns(result.params),
             "n_obs": int(result.obs_indices.size),
-            "n_vars": None if result.var_indices is None else int(result.var_indices.size),
+            "n_vars": -1 if result.var_indices is None else int(result.var_indices.size),
         }
 
         fd, path = tempfile.mkstemp(prefix=f"cellxgene_{result_id}_", suffix=".h5ad")
         os.close(fd)
-        subset.write_h5ad(path)
+        subset.write_h5ad(path, compression="gzip", compression_opts=4)
         return path, f"cellxgene_recluster_{result_id}.h5ad"
+
+    def _expand_export_obs_indices(self, obs_filter):
+        """Return ordered original obs indices for current-view export.
+
+        Unlike ``_axis_filter_to_mask()``, this preserves the order sent by the
+        browser so client-provided annotation arrays line up with exported rows.
+        Range entries use the existing REST convention: ``[start, stop)``.
+        """
+        if obs_filter is None or "index" not in obs_filter:
+            return np.arange(self.data.n_obs, dtype=np.int64)
+
+        raw_index = obs_filter["index"]
+        if not isinstance(raw_index, list):
+            raise ValueError("Export obs filter index must be a list")
+
+        values = []
+        for item in raw_index:
+            if isinstance(item, list):
+                if len(item) != 2:
+                    raise ValueError("Export obs filter ranges must be [start, stop]")
+                start = int(item[0])
+                stop = int(item[1])
+                if start < 0 or stop < start or stop > self.data.n_obs:
+                    raise ValueError("Export obs filter range is out of bounds")
+                values.extend(range(start, stop))
+            else:
+                value = int(item)
+                if value < 0 or value >= self.data.n_obs:
+                    raise ValueError("Export obs filter index is out of bounds")
+                values.append(value)
+
+        obs_indices = np.asarray(values, dtype=np.int64)
+        if obs_indices.size == 0:
+            raise ValueError("Current view contains no cells to export")
+        if np.unique(obs_indices).size != obs_indices.size:
+            raise ValueError("Export obs filter contains duplicate cell indices")
+        return obs_indices
+
+    def _make_export_subset(self, obs_indices):
+        if self.data.isbacked:
+            # h5py-backed fancy indexing is happiest with sorted indices.
+            # Preserve the browser's row order by restoring it after loading.
+            if obs_indices.size > 1 and not np.all(obs_indices[:-1] <= obs_indices[1:]):
+                order = np.argsort(obs_indices)
+                inverse = np.empty_like(order)
+                inverse[order] = np.arange(order.size)
+                subset = self.data[obs_indices[order], :].to_memory()
+                return subset[inverse, :].copy()
+            return self.data[obs_indices, :].to_memory()
+        return self.data[obs_indices, :].copy()
+
+    def _apply_export_obs_annotations(self, subset, annotations):
+        annotations = annotations or []
+        if not isinstance(annotations, list):
+            raise ValueError("obs_annotations must be a list")
+
+        seen = set()
+        existing_obs_columns = set(subset.obs.columns)
+        n_obs = subset.n_obs
+
+        for annotation in annotations:
+            if not isinstance(annotation, dict):
+                raise ValueError("Each obs annotation must be an object")
+            name = annotation.get("name")
+            if not isinstance(name, str) or len(name) == 0:
+                raise ValueError("Each obs annotation must have a non-empty name")
+            if name in existing_obs_columns:
+                raise ValueError(f"Export annotation {name!r} overlaps an existing obs column")
+            if name in seen:
+                raise ValueError(f"Duplicate export annotation {name!r}")
+
+            values = annotation.get("values")
+            if not isinstance(values, list) or len(values) != n_obs:
+                raise ValueError(f"Export annotation {name!r} has the wrong number of values")
+
+            if annotation.get("type") == "categorical":
+                categories = annotation.get("categories") or []
+                categories = [str(category) for category in categories]
+                for value in values:
+                    if value is None:
+                        continue
+                    value = str(value)
+                    if value not in categories:
+                        categories.append(value)
+                subset.obs[name] = pd.Categorical([None if v is None else str(v) for v in values], categories=categories)
+            else:
+                subset.obs[name] = values
+
+            seen.add(name)
+
+    @staticmethod
+    def _json_safe_for_h5ad_uns(value):
+        """Return a JSON-serialisable copy for provenance stored in .uns.
+
+        AnnData can write nested mappings to .h5ad, but a list of dictionaries
+        inside .uns is not reliably writable. Store the detailed export
+        provenance as a JSON string instead, converting NumPy/Pandas objects on
+        the way.
+        """
+
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            return {str(k): AnndataAdaptor._json_safe_for_h5ad_uns(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [AnndataAdaptor._json_safe_for_h5ad_uns(v) for v in value]
+        if isinstance(value, np.ndarray):
+            return AnndataAdaptor._json_safe_for_h5ad_uns(value.tolist())
+        if isinstance(value, np.generic):
+            return AnndataAdaptor._json_safe_for_h5ad_uns(value.item())
+        if isinstance(value, pd.Categorical):
+            return AnndataAdaptor._json_safe_for_h5ad_uns(value.astype(str).tolist())
+        if isinstance(value, (str, bool, int)):
+            return value
+        if isinstance(value, float):
+            return value if np.isfinite(value) else None
+
+        try:
+            is_missing = pd.isna(value)
+        except (TypeError, ValueError):
+            is_missing = False
+        if isinstance(is_missing, (bool, np.bool_)) and is_missing:
+            return None
+
+        return str(value)
+
+    @staticmethod
+    def _json_dumps_for_h5ad_uns(value):
+        return json.dumps(
+            AnndataAdaptor._json_safe_for_h5ad_uns(value),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def _apply_export_recluster_results(self, user_id, subset, obs_indices, result_ids):
+        result_ids = result_ids or []
+        if not isinstance(result_ids, list):
+            raise ValueError("recluster_result_ids must be a list")
+
+        exported_results = []
+        seen = set()
+        for result_id in result_ids:
+            if result_id in seen:
+                continue
+            seen.add(result_id)
+
+            result = self._get_recluster_result(user_id, result_id)
+            result_pos_by_obs = {int(obs_index): pos for pos, obs_index in enumerate(result.obs_indices)}
+
+            labels = np.full((obs_indices.size,), OUTSIDE_RECLUSTER_CATEGORY, dtype=object)
+            embedding = np.full((obs_indices.size, 2), np.nan, dtype=np.float32)
+            for export_pos, obs_index in enumerate(obs_indices):
+                result_pos = result_pos_by_obs.get(int(obs_index))
+                if result_pos is None:
+                    continue
+                labels[export_pos] = result.leiden[result_pos]
+                embedding[export_pos, :] = result.embedding[result_pos, 0:2]
+
+            categories = result.categories + [OUTSIDE_RECLUSTER_CATEGORY]
+            subset.obs[result.cluster_name] = pd.Categorical(labels, categories=categories)
+            subset.obsm[f"X_{result.layout_name}"] = embedding
+
+            exported = {
+                "result_id": result.result_id,
+                "obs_annotation": result.cluster_name,
+                "embedding": f"X_{result.layout_name}",
+                "params": result.params,
+                "n_obs": int(result.obs_indices.size),
+                "n_vars": None if result.var_indices is None else int(result.var_indices.size),
+            }
+            if result.var_indices is not None:
+                used_gene_mask = np.zeros((self.data.n_vars,), dtype=bool)
+                used_gene_mask[result.var_indices] = True
+                col_name = f"cellxgene_recluster_gene_used_{result.result_id}"
+                subset.var[col_name] = used_gene_mask
+                exported["gene_used_var_column"] = col_name
+            exported_results.append(exported)
+
+        return exported_results
+
+    def export_current_view_h5ad(self, user_id, args):
+        args = args or {}
+        obs_filter = args.get("filter", {}).get("obs", None)
+        obs_indices = self._expand_export_obs_indices(obs_filter)
+        subset = self._make_export_subset(obs_indices)
+
+        self._apply_export_obs_annotations(subset, args.get("obs_annotations", []))
+        exported_recluster_results = self._apply_export_recluster_results(
+            user_id,
+            subset,
+            obs_indices,
+            args.get("recluster_result_ids", []),
+        )
+
+        subset.obs["cellxgene_original_obs_index"] = obs_indices
+        subset.uns["cellxgene_current_view_export"] = {
+            "n_obs": int(obs_indices.size),
+            "n_var": int(self.data.n_vars),
+            "includes_user_annotations": bool(args.get("obs_annotations")),
+            "recluster_result_count": len(exported_recluster_results),
+            "recluster_result_ids": [str(item["result_id"]) for item in exported_recluster_results],
+            "recluster_results_json": self._json_dumps_for_h5ad_uns(exported_recluster_results),
+        }
+
+        fd, path = tempfile.mkstemp(prefix="cellxgene_current_view_", suffix=".h5ad")
+        os.close(fd)
+        subset.write_h5ad(path, compression="gzip", compression_opts=4)
+        suffix = "full" if obs_indices.size == self.data.n_obs else f"{obs_indices.size}_cells"
+        return path, f"cellxgene_current_view_{suffix}.h5ad"
+
+
+    def _expand_plot_optional_obs_indices(self, value):
+        if not value:
+            return np.asarray([], dtype=np.int64)
+        if isinstance(value, dict) and "obs" in value:
+            return self._expand_plot_optional_obs_indices(value.get("obs"))
+        if isinstance(value, dict) and "index" in value:
+            if not value.get("index"):
+                return np.asarray([], dtype=np.int64)
+            return self._expand_export_obs_indices(value)
+        if isinstance(value, list):
+            if not value:
+                return np.asarray([], dtype=np.int64)
+            return self._expand_export_obs_indices({"index": value})
+        raise ValueError("Plot selection filters must be obs index filters")
+
+    def _set_scanpy_plot_axis_names(self, subset):
+        """Make visible CELLxGENE obs/var names become AnnData index names.
+
+        CELLxGENE often stores the original gene symbols in a var annotation
+        column such as ``name_0`` while resetting ``adata.var_names``. Scanpy
+        plotting APIs expect gene symbols in ``adata.var_names``, so restore the
+        frontend-visible names on the temporary plotting object only.
+        """
+        var_name_col = self.parameters.get("var_names")
+        if var_name_col is not None and var_name_col in subset.var:
+            subset.var_names = subset.var[var_name_col].astype(str).to_numpy()
+
+        obs_name_col = self.parameters.get("obs_names")
+        if obs_name_col is not None and obs_name_col in subset.obs:
+            subset.obs_names = subset.obs[obs_name_col].astype(str).to_numpy()
+
+    def _apply_scanpy_plot_selection_columns(self, subset, obs_indices, selection1, selection2):
+        selection1_set = set(int(x) for x in selection1)
+        selection2_set = set(int(x) for x in selection2)
+
+        plot_labels = []
+        de_labels = []
+        for obs_index in obs_indices:
+            in_one = int(obs_index) in selection1_set
+            in_two = int(obs_index) in selection2_set
+            if in_one and in_two:
+                plot_labels.append("Selection 1 & 2")
+                de_labels.append("Selection 1")
+            elif in_one:
+                plot_labels.append("Selection 1")
+                de_labels.append("Selection 1")
+            elif in_two:
+                plot_labels.append("Selection 2")
+                de_labels.append("Selection 2")
+            elif selection1_set or selection2_set:
+                plot_labels.append("Other")
+                de_labels.append("Other")
+            else:
+                plot_labels.append("Current view")
+                de_labels.append("Other")
+
+        plot_categories = ["Selection 1", "Selection 2", "Selection 1 & 2", "Other", "Current view"]
+        de_categories = ["Selection 1", "Selection 2", "Other"]
+        subset.obs[PLOT_SELECTION_OBS] = pd.Categorical(
+            plot_labels,
+            categories=plot_categories,
+        ).remove_unused_categories()
+        subset.obs[DE_GROUP_OBS] = pd.Categorical(
+            de_labels,
+            categories=de_categories,
+        ).remove_unused_categories()
+
+    def _make_scanpy_plot_subset(self, user_id, args):
+        args = args or {}
+        obs_filter = args.get("filter", {}).get("obs", None)
+        obs_indices = self._expand_export_obs_indices(obs_filter)
+        subset = self._make_export_subset(obs_indices)
+
+        self._set_scanpy_plot_axis_names(subset)
+        self._apply_export_obs_annotations(subset, args.get("obs_annotations", []))
+        self._apply_export_recluster_results(
+            user_id,
+            subset,
+            obs_indices,
+            args.get("recluster_result_ids", []),
+        )
+
+        selection1 = self._expand_plot_optional_obs_indices(args.get("selection1"))
+        selection2 = self._expand_plot_optional_obs_indices(args.get("selection2"))
+        self._apply_scanpy_plot_selection_columns(subset, obs_indices, selection1, selection2)
+        subset.obs["cellxgene_original_obs_index"] = obs_indices
+        return subset, obs_indices
+
+    def _scanpy_de_cleanup_locked(self):
+        now = time.time()
+        ttl_seconds = 1800
+        expired = [
+            result_id
+            for result_id, record in self._scanpy_de_results.items()
+            if now - record["created_at"] > ttl_seconds
+        ]
+        for result_id in expired:
+            self._scanpy_de_results.pop(result_id, None)
+
+        by_user = {}
+        for result_id, record in self._scanpy_de_results.items():
+            by_user.setdefault(record["user_id"], []).append((result_id, record))
+        for records in by_user.values():
+            records.sort(key=lambda item: item[1]["created_at"], reverse=True)
+            for old_result_id, _record in records[3:]:
+                self._scanpy_de_results.pop(old_result_id, None)
+
+    def _store_scanpy_de_result(self, user_id, adata, de_info):
+        result_id = uuid4().hex[:12]
+        with self._scanpy_de_lock:
+            self._scanpy_de_cleanup_locked()
+            self._scanpy_de_results[result_id] = {
+                "user_id": user_id,
+                "adata": adata,
+                "de_info": de_info,
+                "created_at": time.time(),
+            }
+            self._scanpy_de_cleanup_locked()
+        return result_id
+
+    def _get_scanpy_de_result(self, user_id, result_id):
+        with self._scanpy_de_lock:
+            self._scanpy_de_cleanup_locked()
+            record = self._scanpy_de_results.get(result_id)
+            if record is None or record["user_id"] != user_id:
+                raise KeyError(
+                    "Unknown cached differential-expression result. Run differential expression again."
+                )
+            record["created_at"] = time.time()
+            return record
+
+    def scanpy_plot_run(self, user_id, args):
+        args = args or {}
+        settings = dict(args.get("settings", {}) or {})
+        mode = args.get("mode") or "plot"
+
+        if mode == "de_plot_only":
+            result_id = args.get("de_result_id") or settings.get("de_result_id")
+            if not result_id:
+                raise ValueError("No cached differential-expression result was supplied.")
+            record = self._get_scanpy_de_result(user_id, result_id)
+            result = run_differential_expression_plot_from_precomputed(
+                record["adata"],
+                settings,
+                record["de_info"],
+            )
+            result["de_result_id"] = result_id
+            result["de_cached"] = True
+            result["n_obs"] = int(record["adata"].n_obs)
+            result["n_var"] = int(record["adata"].n_vars)
+            return result
+
+        subset, obs_indices = self._make_scanpy_plot_subset(user_id, args)
+        if mode == "de":
+            result, de_info = run_differential_expression_plot(subset, settings)
+            result_id = self._store_scanpy_de_result(user_id, subset, de_info)
+            result["de_result_id"] = result_id
+            result["de_cached"] = False
+        else:
+            result = run_standard_scanpy_plot(subset, settings)
+        result["n_obs"] = int(obs_indices.size)
+        result["n_var"] = int(subset.n_vars)
+        return result
 
     def _is_valid_layout(self, arr):
         """return True if this layout data is a valid array for front-end presentation:

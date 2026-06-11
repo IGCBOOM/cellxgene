@@ -447,6 +447,9 @@ def _run_graph_clustering(
         key_added=leiden_key,
         neighbors_key=neighbors_key,
         random_state=params["random_state"],
+        flavor="igraph",
+        n_iterations=2,
+        directed=False,
         copy=False,
     )
 
@@ -468,6 +471,9 @@ def _run_graph_clustering(
         "neighbors_key": neighbors_key,
         "leiden_key": leiden_key,
         "umap_key": umap_key,
+        "leiden_flavor": "igraph",
+        "leiden_n_iterations": 2,
+        "leiden_directed": False,
     }
     return (
         work.obsm[umap_key].astype(np.float32, copy=False),
