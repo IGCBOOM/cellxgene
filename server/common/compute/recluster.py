@@ -279,6 +279,42 @@ def public_gene_filter_summary(gene_filter: Optional[dict]) -> Optional[dict]:
     }
 
 
+def _normalize_harmony_params(params: dict) -> dict:
+    """Validate and normalize optional Harmony batch-correction settings."""
+
+    harmony_enabled = bool(params.get("harmony_enabled", False))
+    harmony_batch_key = str(params.get("harmony_batch_key", "") or "").strip()
+    if not harmony_enabled:
+        return {
+            "harmony_enabled": False,
+            "harmony_batch_key": None,
+            "harmony_max_iter_harmony": int(params.get("harmony_max_iter_harmony", 10) or 10),
+            "harmony_theta": None,
+        }
+
+    if not harmony_batch_key:
+        raise ValueError("Choose an obs column to use as the Harmony batch key")
+
+    harmony_max_iter = int(params.get("harmony_max_iter_harmony", 10))
+    if harmony_max_iter < 1:
+        raise ValueError("harmony_max_iter_harmony must be at least 1")
+
+    harmony_theta = params.get("harmony_theta", None)
+    if harmony_theta in (None, ""):
+        harmony_theta = None
+    else:
+        harmony_theta = float(harmony_theta)
+        if harmony_theta < 0:
+            raise ValueError("harmony_theta must be non-negative")
+
+    return {
+        "harmony_enabled": harmony_enabled,
+        "harmony_batch_key": harmony_batch_key if harmony_enabled else None,
+        "harmony_max_iter_harmony": harmony_max_iter,
+        "harmony_theta": harmony_theta,
+    }
+
+
 def normalize_recluster_params(params: Optional[dict], *, n_obs: int, rep_dim: int) -> dict:
     """Validate and normalize representation-based reclustering parameters."""
 
@@ -309,6 +345,8 @@ def normalize_recluster_params(params: Optional[dict], *, n_obs: int, rep_dim: i
 
     random_state = int(params.get("random_state", 0))
 
+    harmony_params = _normalize_harmony_params(params)
+
     return {
         "compute_mode": "obsm",
         "use_rep": use_rep,
@@ -318,6 +356,7 @@ def normalize_recluster_params(params: Optional[dict], *, n_obs: int, rep_dim: i
         "min_dist": min_dist,
         "random_state": random_state,
         "gene_filter_mode": GENE_FILTER_NONE,
+        **harmony_params,
     }
 
 
@@ -356,6 +395,7 @@ def normalize_recluster_gene_params(params: Optional[dict], *, n_obs: int, n_var
     n_pcs = min(n_pcs, max_pca_comps)
 
     mode = str(params.get("gene_filter_mode", GENE_FILTER_WHITELIST) or GENE_FILTER_WHITELIST).lower()
+    harmony_params = _normalize_harmony_params(params)
     return {
         "compute_mode": "expression_genes",
         "gene_filter_mode": mode,
@@ -366,6 +406,7 @@ def normalize_recluster_gene_params(params: Optional[dict], *, n_obs: int, n_var
         "random_state": random_state,
         "gene_filter_log1p": log1p,
         "gene_filter_scale": scale,
+        **harmony_params,
     }
 
 
@@ -407,11 +448,94 @@ def _slice_expression_matrix(X, obs_indices: np.ndarray, var_indices: np.ndarray
         return np.asarray(np.vstack(chunks), dtype=np.float32, order="C")
 
 
-def _build_obs_frame(source_adata, obs_indices: np.ndarray) -> pd.DataFrame:
+def _build_obs_frame(source_adata, obs_indices: np.ndarray, obs_columns: Optional[list[str]] = None) -> pd.DataFrame:
     obs_names = source_adata.obs_names.to_numpy()[obs_indices]
     obs = pd.DataFrame(index=pd.Index([str(x) for x in obs_names], name="obs_names"))
     obs["cellxgene_original_obs_index"] = obs_indices
+
+    for column in obs_columns or []:
+        if column is None or column not in source_adata.obs:
+            continue
+        values = source_adata.obs[column].to_numpy()[obs_indices]
+        values = pd.Series(values, index=obs.index)
+        values = values.where(~pd.isna(values), "__missing__").astype(str)
+        obs[column] = pd.Categorical(values)
+
     return obs
+
+
+def _harmony_obs_columns(params: dict) -> list[str]:
+    if not params.get("harmony_enabled"):
+        return []
+    batch_key = params.get("harmony_batch_key")
+    return [] if not batch_key else [str(batch_key)]
+
+
+def _run_harmony_on_basis(
+    work: ad.AnnData,
+    *,
+    basis: str,
+    adjusted_basis: str,
+    params: dict,
+    progress: Optional[ProgressCallback],
+) -> str:
+    """Run Harmony directly through harmonypy and return the adjusted basis key."""
+
+    if not params.get("harmony_enabled"):
+        return basis
+
+    batch_key = params.get("harmony_batch_key")
+    if batch_key not in work.obs:
+        raise ValueError(f"Harmony batch key {batch_key!r} is not available in the reclustering obs data")
+
+    batch_values = work.obs[batch_key].astype(str)
+    if batch_values.nunique(dropna=True) < 2:
+        raise ValueError("Harmony requires at least two batch categories among the selected cells")
+
+    if basis not in work.obsm:
+        raise ValueError(f"Harmony basis {basis!r} is not available")
+
+    _report(progress, f"Running Harmony batch correction on {batch_key}", 0.24)
+    try:
+        import harmonypy as hm
+    except ImportError as e:
+        raise ImportError("Harmony reclustering requires harmonypy. Reinstall with current requirements.") from e
+
+    X = np.asarray(work.obsm[basis], dtype=np.float64, order="C")
+    meta = pd.DataFrame({batch_key: batch_values.to_numpy()}, index=work.obs_names)
+
+    harmony_kwargs = {
+        "max_iter_harmony": params.get("harmony_max_iter_harmony", 10),
+        "verbose": False,
+        "random_state": params.get("random_state", 0),
+    }
+    if params.get("harmony_theta") is not None:
+        harmony_kwargs["theta"] = params["harmony_theta"]
+
+    try:
+        harmony_out = hm.run_harmony(X, meta, batch_key, **harmony_kwargs)
+    except TypeError:
+        # Older harmonypy versions may not accept all optional kwargs. Retry with
+        # only the broadly supported call signature.
+        fallback_kwargs = {"max_iter_harmony": harmony_kwargs["max_iter_harmony"], "verbose": False}
+        try:
+            harmony_out = hm.run_harmony(X, meta, batch_key, **fallback_kwargs)
+        except TypeError:
+            harmony_out = hm.run_harmony(X, meta, batch_key)
+
+    corrected = np.asarray(harmony_out.Z_corr)
+    if corrected.shape == X.shape:
+        pass
+    elif corrected.T.shape == X.shape:
+        corrected = corrected.T
+    else:
+        raise ValueError(
+            "Harmony returned an unexpected corrected matrix shape "
+            f"{corrected.shape}; expected {X.shape}"
+        )
+
+    work.obsm[adjusted_basis] = np.asarray(corrected, dtype=np.float32, order="C")
+    return adjusted_basis
 
 
 def _run_graph_clustering(
@@ -523,21 +647,43 @@ def recluster_from_obsm(
     X_rep = rep[obs_indices, :]
     X_rep = np.asarray(X_rep[:, : params["n_pcs"]], dtype=np.float32, order="C")
 
-    obs = _build_obs_frame(source_adata, obs_indices)
+    obs = _build_obs_frame(source_adata, obs_indices, obs_columns=_harmony_obs_columns(params))
 
     # This is a working object whose X is the PCA/latent representation, not
     # the full expression matrix. It is intentionally discarded after extracting
     # the small result arrays.
     work = ad.AnnData(X=X_rep, obs=obs)
 
+    use_rep_for_neighbors = "X"
+    neighbors_n_pcs = None
+    harmony_basis = None
+    if params.get("harmony_enabled"):
+        harmony_basis = f"X_cxg_recluster_harmony_input_{result_id}"
+        harmony_adjusted_basis = f"X_cxg_recluster_harmony_{result_id}"
+        work.obsm[harmony_basis] = X_rep
+        use_rep_for_neighbors = _run_harmony_on_basis(
+            work,
+            basis=harmony_basis,
+            adjusted_basis=harmony_adjusted_basis,
+            params=params,
+            progress=progress,
+        )
+
     embedding, leiden, categories, key_params = _run_graph_clustering(
         work,
         result_id=result_id,
         params=params,
-        use_rep="X",
-        neighbors_n_pcs=None,
+        use_rep=use_rep_for_neighbors,
+        neighbors_n_pcs=neighbors_n_pcs,
         progress=progress,
     )
+
+    if harmony_basis is not None:
+        key_params = {
+            **key_params,
+            "harmony_basis": harmony_basis,
+            "harmony_adjusted_basis": use_rep_for_neighbors,
+        }
 
     return ReclusterResult(
         result_id=result_id,
@@ -584,7 +730,7 @@ def recluster_from_expression_genes(
 
     _report(progress, "Preparing selected genes", 0.10)
     X = _slice_expression_matrix(source_adata.X, obs_indices, var_indices)
-    obs = _build_obs_frame(source_adata, obs_indices)
+    obs = _build_obs_frame(source_adata, obs_indices, obs_columns=_harmony_obs_columns(params))
     var = pd.DataFrame(index=pd.Index([str(x) for x in var_names], name="var_names"))
     var["cellxgene_original_var_index"] = var_indices
     work = ad.AnnData(X=X, obs=obs, var=var)
@@ -615,6 +761,26 @@ def recluster_from_expression_genes(
         use_rep = "X_pca"
         neighbors_n_pcs = params["n_pcs"]
 
+    harmony_basis = None
+    if params.get("harmony_enabled"):
+        if pca_key is None:
+            harmony_basis = f"X_cxg_recluster_harmony_input_{result_id}"
+            if sparse.issparse(work.X):
+                work.obsm[harmony_basis] = work.X.toarray().astype(np.float32)
+            else:
+                work.obsm[harmony_basis] = np.asarray(work.X, dtype=np.float32, order="C")
+        else:
+            harmony_basis = pca_key
+        harmony_adjusted_basis = f"X_cxg_recluster_harmony_{result_id}"
+        use_rep = _run_harmony_on_basis(
+            work,
+            basis=harmony_basis,
+            adjusted_basis=harmony_adjusted_basis,
+            params=params,
+            progress=progress,
+        )
+        neighbors_n_pcs = None
+
     embedding, leiden, categories, key_params = _run_graph_clustering(
         work,
         result_id=result_id,
@@ -625,6 +791,13 @@ def recluster_from_expression_genes(
     )
 
     gene_filter_summary = public_gene_filter_summary(gene_filter)
+    if harmony_basis is not None:
+        key_params = {
+            **key_params,
+            "harmony_basis": harmony_basis,
+            "harmony_adjusted_basis": use_rep,
+        }
+
     result_params = {
         **params,
         **key_params,

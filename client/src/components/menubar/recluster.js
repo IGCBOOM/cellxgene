@@ -36,6 +36,10 @@ const DEFAULT_PARAMS = {
   gene_filter_case_sensitive: false,
   gene_filter_log1p: false,
   gene_filter_scale: false,
+  harmony_enabled: false,
+  harmony_batch_key: "",
+  harmony_max_iter_harmony: 10,
+  harmony_theta: "",
 };
 
 function hasGeneTerms(text) {
@@ -59,11 +63,13 @@ function textNumberValue(text) {
   const limits = state.config?.limits ?? {};
   const representations =
     state.config?.parameters?.["recluster-representations"] ?? [];
+  const batchKeys = state.config?.parameters?.["recluster-batch-keys"] ?? [];
 
   return {
     selectedCount,
     recluster: state.recluster,
     representations,
+    batchKeys,
     minSelected: limits.recluster_cellcount_min ?? 10,
     maxSelected: limits.recluster_cellcount_max,
     maxGeneCount: limits.recluster_gene_count_max,
@@ -80,10 +86,12 @@ class Recluster extends React.PureComponent {
     const useRep = representations.includes("X_pca")
       ? "X_pca"
       : representations[0];
+    const harmonyBatchKey = props.batchKeys.length ? props.batchKeys[0] : "";
     this.state = {
       params: {
         ...DEFAULT_PARAMS,
         use_rep: useRep,
+        harmony_batch_key: harmonyBatchKey,
       },
       paramText: {
         resolution: String(DEFAULT_PARAMS.resolution),
@@ -93,20 +101,30 @@ class Recluster extends React.PureComponent {
   }
 
   componentDidUpdate(prevProps) {
-    const { representations } = this.props;
-    if (
-      representations === prevProps.representations ||
-      !representations.length
-    ) {
-      return;
-    }
-
+    const { representations, batchKeys } = this.props;
     const { params } = this.state;
-    if (!representations.includes(params.use_rep)) {
+
+    if (
+      representations !== prevProps.representations &&
+      representations.length &&
+      !representations.includes(params.use_rep)
+    ) {
       const useRep = representations.includes("X_pca")
         ? "X_pca"
         : representations[0];
-      this.setState({ params: { ...params, use_rep: useRep } });
+      this.setState((prev) => ({
+        params: { ...prev.params, use_rep: useRep },
+      }));
+    }
+
+    if (
+      batchKeys !== prevProps.batchKeys &&
+      batchKeys.length &&
+      !batchKeys.includes(params.harmony_batch_key)
+    ) {
+      this.setState((prev) => ({
+        params: { ...prev.params, harmony_batch_key: batchKeys[0] },
+      }));
     }
   }
 
@@ -196,6 +214,28 @@ class Recluster extends React.PureComponent {
     });
   };
 
+  setHarmonyEnabled = (event) => {
+    const enabled = event.currentTarget.checked;
+    const { batchKeys } = this.props;
+    this.setState((prev) => ({
+      params: {
+        ...prev.params,
+        harmony_enabled: enabled,
+        harmony_batch_key:
+          enabled && !prev.params.harmony_batch_key && batchKeys.length
+            ? batchKeys[0]
+            : prev.params.harmony_batch_key,
+      },
+    }));
+  };
+
+  setHarmonyBatchKey = (event) => {
+    const batchKey = event.currentTarget.value;
+    this.setState((prev) => ({
+      params: { ...prev.params, harmony_batch_key: batchKey },
+    }));
+  };
+
   recluster = () => {
     const { dispatch } = this.props;
     dispatch(actions.reclusterSelectionAction(this.paramsForSubmit()));
@@ -241,6 +281,7 @@ class Recluster extends React.PureComponent {
       selectedCount,
       recluster,
       representations,
+      batchKeys,
       maxGeneCount,
       maxExpressionValues,
     } = this.props;
@@ -257,6 +298,8 @@ class Recluster extends React.PureComponent {
     const invalidMinDist =
       !isFiniteTextNumber(paramText.min_dist) ||
       textNumberValue(paramText.min_dist) < 0;
+    const invalidHarmonyBatch =
+      params.harmony_enabled && !params.harmony_batch_key;
 
     return (
       <div style={{ width: 340, padding: 12 }}>
@@ -367,6 +410,73 @@ class Recluster extends React.PureComponent {
           </>
         ) : null}
 
+        <FormGroup label="Harmony batch correction">
+          <Checkbox
+            checked={params.harmony_enabled}
+            label="Use Harmony before neighbors, Leiden, and UMAP"
+            disabled={!batchKeys.length}
+            onChange={this.setHarmonyEnabled}
+          />
+          {!batchKeys.length ? (
+            <p style={{ marginTop: 4, fontSize: 12 }}>
+              No categorical obs columns are available as Harmony batch keys.
+            </p>
+          ) : null}
+        </FormGroup>
+
+        {params.harmony_enabled ? (
+          <>
+            <FormGroup
+              label="Harmony batch obs column"
+              helperText="Harmony corrects the PCA/representation before the neighbor graph is computed."
+              intent={invalidHarmonyBatch ? "danger" : undefined}
+            >
+              <HTMLSelect
+                fill
+                value={params.harmony_batch_key}
+                onChange={this.setHarmonyBatchKey}
+              >
+                {batchKeys.map((key) => (
+                  <option value={key} key={key}>
+                    {key}
+                  </option>
+                ))}
+              </HTMLSelect>
+            </FormGroup>
+
+            <FormGroup label="Harmony iterations">
+              <NumericInput
+                fill
+                min={1}
+                majorStepSize={10}
+                stepSize={1}
+                value={params.harmony_max_iter_harmony}
+                onValueChange={(value) =>
+                  this.setNumberParam(
+                    "harmony_max_iter_harmony",
+                    Math.round(value)
+                  )
+                }
+              />
+            </FormGroup>
+
+            <FormGroup
+              label="Harmony theta"
+              helperText="Leave blank for the harmonypy default. Larger values encourage stronger batch mixing."
+            >
+              <input
+                className={Classes.INPUT}
+                style={{ width: "100%" }}
+                value={params.harmony_theta}
+                placeholder="default"
+                onChange={(event) =>
+                  this.setTextParam("harmony_theta", event.currentTarget.value)
+                }
+              />
+            </FormGroup>
+          </>
+        ) : null}
+
         <FormGroup
           label="Resolution"
           intent={invalidResolution ? "danger" : undefined}
@@ -461,7 +571,8 @@ class Recluster extends React.PureComponent {
             recluster.loading ||
             missingGeneList ||
             invalidResolution ||
-            invalidMinDist
+            invalidMinDist ||
+            invalidHarmonyBatch
           }
           onClick={this.recluster}
           text="Run reclustering"

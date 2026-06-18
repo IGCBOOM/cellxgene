@@ -20,6 +20,7 @@ export const configDefaults = {
     "diffexp-may-be-slow": false,
     "recluster-enabled": false,
     "recluster-representations": [],
+    "recluster-batch-keys": [],
     "scanpy-plot-enabled": false,
     "scanpy-plot-definitions": [],
     "scanpy-de-plot-definitions": [],

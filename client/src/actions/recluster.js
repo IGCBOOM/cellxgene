@@ -20,6 +20,10 @@ const DEFAULT_RECLUSTER_PARAMS = {
   gene_filter_case_sensitive: false,
   gene_filter_log1p: false,
   gene_filter_scale: false,
+  harmony_enabled: false,
+  harmony_batch_key: "",
+  harmony_max_iter_harmony: 10,
+  harmony_theta: "",
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

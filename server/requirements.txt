@@ -12,6 +12,7 @@ flatbuffers==2.0.7
 flatten-dict>=0.2.0
 fsspec>0.8.0
 gunicorn>=20.0.4
+harmonypy>=0.2,<1
 h5py>=3.0.0
 numba>=0.60.0
 numpy>=2,<3

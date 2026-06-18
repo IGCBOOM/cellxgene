@@ -98,7 +98,7 @@ class AnndataAdaptor(DataAdaptor):
 
     def get_library_versions(self):
         versions = dict(anndata=str(importlib.metadata.version("anndata")))
-        for package_name in ("scanpy", "igraph", "leidenalg", "umap-learn"):
+        for package_name in ("scanpy", "igraph", "leidenalg", "umap-learn", "harmonypy"):
             try:
                 versions[package_name] = str(importlib.metadata.version(package_name))
             except importlib.metadata.PackageNotFoundError:
@@ -254,6 +254,7 @@ class AnndataAdaptor(DataAdaptor):
         self.parameters.update({
             "recluster-enabled": True,
             "recluster-representations": self.get_recluster_representations(),
+            "recluster-batch-keys": self.get_recluster_batch_keys(),
             "scanpy-plot-enabled": True,
             "scanpy-plot-definitions": SCANPY_PLOT_DEFINITIONS,
             "scanpy-de-plot-definitions": DE_PLOT_DEFINITIONS,
@@ -288,6 +289,35 @@ class AnndataAdaptor(DataAdaptor):
             reps.insert(0, "X_pca")
         return reps
 
+    def get_recluster_batch_keys(self):
+        """Return obs columns that are plausible Harmony batch keys."""
+
+        keys = []
+        for key in self.data.obs.columns:
+            series = self.data.obs[key]
+            try:
+                n_unique = int(series.nunique(dropna=True))
+            except Exception:
+                continue
+
+            if n_unique < 2:
+                continue
+
+            dtype = series.dtype
+            is_categorical_like = (
+                isinstance(dtype, CategoricalDtype)
+                or pd.api.types.is_object_dtype(dtype)
+                or pd.api.types.is_string_dtype(dtype)
+                or pd.api.types.is_bool_dtype(dtype)
+            )
+            is_small_integer_code = pd.api.types.is_integer_dtype(dtype) and n_unique <= 100
+
+            if is_categorical_like or is_small_integer_code:
+                keys.append(str(key))
+
+        return keys
+
+
     def get_recluster_gene_names(self):
         """Return frontend-visible gene names used by the gene-list UI.
 
@@ -299,6 +329,22 @@ class AnndataAdaptor(DataAdaptor):
         if var_name_col is not None and var_name_col in self.data.var:
             return self.data.var[var_name_col].astype(str).to_numpy()
         return np.asarray([str(x) for x in self.data.var_names], dtype=object)
+
+    def _validate_recluster_harmony_params(self, obs_indices, params):
+        if not bool(params.get("harmony_enabled", False)):
+            return
+
+        batch_key = str(params.get("harmony_batch_key", "") or "").strip()
+        if not batch_key:
+            raise ValueError("Choose an obs column to use as the Harmony batch key")
+        if batch_key not in self.data.obs:
+            available = ", ".join(self.get_recluster_batch_keys())
+            raise ValueError(f"Harmony batch key {batch_key!r} is not available. Available: {available}")
+
+        values = pd.Series(self.data.obs[batch_key].to_numpy()[obs_indices]).dropna().astype(str)
+        if int(values.nunique(dropna=True)) < 2:
+            raise ValueError("Harmony requires at least two batch categories among the selected cells")
+
 
     def _resolve_recluster_gene_filter(self, params):
         return resolve_gene_filter(self.get_recluster_gene_names(), params)
@@ -437,6 +483,7 @@ class AnndataAdaptor(DataAdaptor):
             raise ValueError("Recluster request exceeds max cell count limit")
 
         params = dict(args.get("params", {}) or {})
+        self._validate_recluster_harmony_params(obs_indices, params)
         gene_filter = self._resolve_recluster_gene_filter(params)
         self._validate_recluster_gene_filter_limits(n_obs, gene_filter)
 
